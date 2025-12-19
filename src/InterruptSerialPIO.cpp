@@ -19,7 +19,6 @@
 */
 
 #include "InterruptSerialPIO.h"
-#include "CoreMutex.h"
 #include <hardware/gpio.h>
 #include <hardware/irq.h>
 #include "pio_uart.pio.h"
@@ -28,7 +27,7 @@
 static InterruptSerialPIO *g_pioInstances[2][4] = {};
 static int rxProgramOffset[2] = {-1, -1};
 static bool irqInit[2] = {false, false};
-void (*InterruptSerialPIO::_messageSink)(const ModuleMessage &) = nullptr;
+void (*InterruptSerialPIO::_messageSink)(ModuleMessage &) = nullptr;
 
 static uint8_t calcChecksum(const uint8_t *data, size_t len)
 {
@@ -63,22 +62,19 @@ static void __not_in_flash_func(pio1_irq)()
     pio_irq_common(pio1);
 }
 
-InterruptSerialPIO::InterruptSerialPIO(pin_size_t tx, pin_size_t rx, size_t fifoSize)
+InterruptSerialPIO::InterruptSerialPIO(pin_size_t tx, pin_size_t rx)
 {
     _tx = tx;
     _rx = rx;
-    _fifoSize = fifoSize + 1; // Always one unused entry
-    _queue = new uint8_t[_fifoSize];
-    mutex_init(&_mutex);
+    lastByteReceivedTime = 0;
 }
 
 InterruptSerialPIO::~InterruptSerialPIO()
 {
     end();
-    delete[] _queue;
 }
 
-void InterruptSerialPIO::setMessageSink(void (*handler)(const ModuleMessage &))
+void InterruptSerialPIO::setMessageSink(void (*handler)(ModuleMessage &))
 {
     _messageSink = handler;
 }
@@ -113,13 +109,9 @@ static bool claim_rx_sm(PIO &outPio, int &outSm, uint &_offset)
     return false;
 }
 
-void InterruptSerialPIO::begin(unsigned long baud, uint16_t config)
+void InterruptSerialPIO::begin(unsigned long baud)
 {
-    (void)config;
     (void)baud; // fixed
-    _writer = 0;
-    _reader = 0;
-    _overflow = false;
     resetParser();
 
     if ((_tx == NOPIN) && (_rx == NOPIN))
@@ -152,7 +144,9 @@ void InterruptSerialPIO::begin(unsigned long baud, uint16_t config)
         pio_sm_init(_rxPIO, _rxSM, _rxOffset, &c);
         pio_sm_set_consecutive_pindirs(_rxPIO, _rxSM, _rx, 1, false);
         pio_gpio_init(_rxPIO, _rx);
-        gpio_pull_up(_rx);
+        // Bias RX low so a disconnected/floating module doesn't appear as UART-idle HIGH.
+        // The module's TX should actively drive HIGH when present/idle.
+        gpio_pull_down(_rx);
         pio_sm_clear_fifos(_rxPIO, _rxSM);
 
         // Enable IRQ for RX FIFO not empty
@@ -211,81 +205,64 @@ void InterruptSerialPIO::end()
     _running = false;
 }
 
-int InterruptSerialPIO::peek()
-{
-    CoreMutex m(&_mutex);
-    if (!_running || !m || (_rx == NOPIN))
-    {
-        return -1;
-    }
-    if (_writer != _reader)
-    {
-        return _queue[_reader];
-    }
-    return -1;
-}
-
-int InterruptSerialPIO::read()
-{
-    CoreMutex m(&_mutex);
-    if (!_running || !m || (_rx == NOPIN))
-    {
-        return -1;
-    }
-    if (_writer != _reader)
-    {
-        auto ret = _queue[_reader];
-        asm volatile("" ::: "memory");
-        auto next_reader = (_reader + 1) % _fifoSize;
-        asm volatile("" ::: "memory");
-        _reader = next_reader;
-        return ret;
-    }
-    return -1;
-}
-
-int InterruptSerialPIO::available()
-{
-    CoreMutex m(&_mutex);
-    if (!_running || !m || (_rx == NOPIN))
-    {
-        return 0;
-    }
-    return (_fifoSize + _writer - _reader) % _fifoSize;
-}
-
-int InterruptSerialPIO::availableForWrite()
-{
-    // Bit-banged TX: always ready for one byte
-    return 1;
-}
-
-void InterruptSerialPIO::flush()
-{
-    // Bit-banged, nothing buffered
-}
-
+// Host TX are small command payloads (~10 bytes) so bit-banging is acceptable
 size_t InterruptSerialPIO::write(uint8_t c)
 {
     if (!_running || (_tx == NOPIN))
+        return 0;
+
+    // Calculate cycles per bit (assuming 133MHz or 125MHz system clock)
+    // 460800 baud is approx 271 cycles at 125MHz
+    const uint32_t bitCycles = clock_get_hz(clk_sys) / FIXED_BAUD;
+
+    // Pre-calculate masks
+    uint32_t pinMask = 1ul << _tx;
+
+    noInterrupts();
+
+    // Start Bit (Low)
+    sio_hw->gpio_clr = pinMask;
+    uint32_t nextCycle = time_us_32() * (clock_get_hz(clk_sys) / 1000000); // Get current cycles approx
+    // Note: Better to use the SysTick or strictly timed loops if available,
+    // but for simplicity, use the SDK's busy_wait logic:
+
+    // Better simple implementation using busy_wait_at_least_cycles (from pico/time.h)
+    // Or just a tuned delay loop.
+
+    // START BIT
+    sio_hw->gpio_clr = pinMask;
+    busy_wait_at_least_cycles(bitCycles);
+
+    // DATA BITS
+    for (int i = 0; i < 8; i++)
+    {
+        if (c & (1 << i))
+            sio_hw->gpio_set = pinMask;
+        else
+            sio_hw->gpio_clr = pinMask;
+        busy_wait_at_least_cycles(bitCycles);
+    }
+
+    // STOP BIT (High)
+    sio_hw->gpio_set = pinMask;
+    busy_wait_at_least_cycles(bitCycles);
+
+    interrupts();
+    return 1;
+}
+
+size_t InterruptSerialPIO::write(const uint8_t *buffer, size_t size)
+{
+    if (!buffer || size == 0)
     {
         return 0;
     }
-
-    uint32_t bitUs = static_cast<uint32_t>((1000000UL + (FIXED_BAUD / 2)) / FIXED_BAUD);
-    noInterrupts();
-    digitalWrite(_tx, LOW); // start
-    delayMicroseconds(bitUs);
-    for (int i = 0; i < 8; i++)
+    size_t written = 0;
+    for (size_t i = 0; i < size; i++)
     {
-        digitalWrite(_tx, (c >> i) & 0x01);
-        delayMicroseconds(bitUs);
+        written += write(buffer[i]);
     }
-    digitalWrite(_tx, HIGH); // stop
-    delayMicroseconds(bitUs);
-    interrupts();
-
-    return 1;
+    return written;
 }
 
 void __not_in_flash_func(InterruptSerialPIO::_handleIRQ)()
@@ -296,24 +273,15 @@ void __not_in_flash_func(InterruptSerialPIO::_handleIRQ)()
     }
     while (!pio_sm_is_rx_fifo_empty(_rxPIO, _rxSM))
     {
+        uint32_t now = millis();
+        if (_parser.syncing && _parser.lastByteReceivedTime && (now - _parser.lastByteReceivedTime > PARSER_TIMEOUT_MS))
+        {
+            resetParser();
+        }
         uint8_t val = static_cast<uint8_t>((pio_sm_get_blocking(_rxPIO, _rxSM) >> 24) & 0xFF);
 
-        auto next_writer = _writer + 1;
-        if (next_writer == _fifoSize)
-        {
-            next_writer = 0;
-        }
-        if (next_writer != _reader)
-        {
-            _queue[_writer] = val;
-            asm volatile("" ::: "memory");
-            _writer = next_writer;
-            processByte(val);
-        }
-        else
-        {
-            _overflow = true;
-        }
+        // Protocol parsing is the only RX consumer.
+        processByte(val);
     }
 }
 
@@ -322,6 +290,8 @@ void InterruptSerialPIO::resetParser()
     _parser.length = 0;
     _parser.expectedLength = 0;
     _parser.syncing = false;
+    _parser.lastByteReceivedTime = 0;
+    lastByteReceivedTime = 0;
 }
 
 void InterruptSerialPIO::processByte(uint8_t b)
@@ -345,17 +315,25 @@ void InterruptSerialPIO::processByte(uint8_t b)
     }
 
     p.buffer[p.length++] = b;
+    uint32_t now = millis();
+    p.lastByteReceivedTime = now;
+    lastByteReceivedTime = now;
 
-    if (p.length == 3)
+    if (p.length == 4)
     {
-        uint8_t payloadLen = p.buffer[2];
-        uint16_t total = 4 + payloadLen;
+        uint16_t payloadLen = static_cast<uint16_t>(p.buffer[2]) | (static_cast<uint16_t>(p.buffer[3]) << 8);
+        if (payloadLen > MODULE_MAX_PAYLOAD)
+        {
+            resetParser();
+            return;
+        }
+        uint32_t total = 5u + payloadLen; // 4-byte header + payload + checksum
         if (total > sizeof(p.buffer))
         {
             resetParser();
             return;
         }
-        p.expectedLength = total;
+        p.expectedLength = static_cast<uint16_t>(total);
     }
 
     if (p.expectedLength > 0 && p.length == p.expectedLength)
@@ -369,27 +347,36 @@ void InterruptSerialPIO::processByte(uint8_t b)
     }
 }
 
+extern ModuleMessage *allocateMessageFromIRQ();
+extern void commitMessageFromIRQ();
+
 void InterruptSerialPIO::emitFrame()
 {
-    if (!_messageSink)
-    {
-        return;
-    }
-
     if (_parser.length < 4)
     {
         return;
     }
 
-    ModuleMessage msg = {};
-    msg.moduleRow = _row;
-    msg.moduleCol = _col;
-    msg.commandId = static_cast<ModuleMessageId>(_parser.buffer[1]);
-    msg.payloadLength = _parser.buffer[2];
-    if (msg.payloadLength > sizeof(msg.payload))
+    ModuleMessage *slot = allocateMessageFromIRQ();
+    if (!slot)
     {
-        msg.payloadLength = sizeof(msg.payload);
+        return;
     }
-    memcpy(msg.payload, &_parser.buffer[3], msg.payloadLength);
-    _messageSink(msg);
+
+    slot->moduleRow = _row;
+    slot->moduleCol = _col;
+    slot->commandId = static_cast<ModuleMessageId>(_parser.buffer[1]);
+    slot->payloadLength = static_cast<uint16_t>(_parser.buffer[2]) | (static_cast<uint16_t>(_parser.buffer[3]) << 8);
+    if (slot->payloadLength > sizeof(slot->payload))
+    {
+        slot->payloadLength = sizeof(slot->payload);
+    }
+    memcpy(slot->payload, &_parser.buffer[4], slot->payloadLength);
+
+    commitMessageFromIRQ();
+
+    if (_messageSink)
+    {
+        _messageSink(*slot);
+    }
 }

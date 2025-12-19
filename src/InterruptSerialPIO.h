@@ -21,24 +21,23 @@
 #pragma once
 
 #include <Arduino.h>
-#include "api/HardwareSerial.h"
 #include <hardware/gpio.h>
 #include <hardware/pio.h>
-#include "CoreMutex.h"
 #include "common.hpp"
 
-class InterruptSerialPIO : public arduino::HardwareSerial
+class InterruptSerialPIO
 {
 public:
     static constexpr uint32_t FIXED_BAUD = 460800;
 
-    InterruptSerialPIO(pin_size_t tx, pin_size_t rx, size_t fifoSize = 64);
+    volatile uint32_t lastByteReceivedTime;
+
+    InterruptSerialPIO(pin_size_t tx, pin_size_t rx);
     ~InterruptSerialPIO();
 
     // Fixed 460800 8N1
-    void begin(unsigned long baud = FIXED_BAUD) override { begin(baud, SERIAL_8N1); }
-    void begin(unsigned long baud, uint16_t config) override;
-    void end() override;
+    void begin(unsigned long baud = FIXED_BAUD);
+    void end();
 
     // Metadata so parsed frames can include port info
     void setPortLocation(uint8_t row, uint8_t col)
@@ -47,18 +46,19 @@ public:
         _col = col;
     }
 
-    // Register a global sink invoked from IRQ when a frame is parsed
-    static void setMessageSink(void (*handler)(const ModuleMessage &));
+    // Change pins
+    void setPins(pin_size_t tx, pin_size_t rx)
+    {
+        _tx = tx;
+        _rx = rx;
+    }
 
-    // Minimal HardwareSerial surface
-    int peek() override;
-    int read() override;
-    int available() override;
-    int availableForWrite() override;
-    void flush() override;
-    size_t write(uint8_t c) override; // bit-banged TX
-    using Print::write;
-    operator bool() override { return _running; }
+    // Register a global sink invoked from IRQ when a frame is parsed
+    static void setMessageSink(void (*handler)(ModuleMessage &));
+
+    // TX
+    size_t write(uint8_t c); // bit-banged TX
+    size_t write(const uint8_t *buffer, size_t size);
 
     // ISR entry
     void _handleIRQ();
@@ -66,11 +66,14 @@ public:
 private:
     struct Parser
     {
-        uint8_t buffer[260];
-        uint8_t length = 0;
-        uint8_t expectedLength = 0;
+        uint8_t buffer[MODULE_MAX_PAYLOAD + 5];
+        uint16_t length = 0;
+        uint16_t expectedLength = 0;
         bool syncing = false;
+        uint32_t lastByteReceivedTime = 0;
     } _parser;
+
+    static constexpr uint32_t PARSER_TIMEOUT_MS = 50;
 
     void resetParser();
     void processByte(uint8_t b);
@@ -78,22 +81,15 @@ private:
 
     bool _running = false;
     pin_size_t _tx, _rx;
-    mutex_t _mutex;
-    bool _overflow;
 
     PIO _rxPIO;
     int _rxSM;
     uint _rxOffset;
 
-    size_t _fifoSize;
-    uint32_t _writer;
-    uint32_t _reader;
-    uint8_t *_queue;
-
     uint8_t _row = 0;
     uint8_t _col = 0;
 
-    static void (*_messageSink)(const ModuleMessage &);
+    static void (*_messageSink)(ModuleMessage &);
 };
 
 #ifdef ARDUINO_NANO_RP2040_CONNECT

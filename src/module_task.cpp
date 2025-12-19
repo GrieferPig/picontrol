@@ -1,0 +1,640 @@
+#include <Arduino.h>
+#include <cstring>
+
+#include "port.h"
+#include "runtime_config.h"
+#include "runtime_query.h"
+#include "usb_device.h"
+#include "mapping.h"
+
+// Everything module-oriented runs on core 1.
+
+static uint32_t lastPingMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+static uint32_t connectionTime[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+static bool propsRequested[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+static constexpr uint32_t DEMO_PARAM_DELAY_MS = 2000;
+static constexpr uint32_t DEMO_GET_PARAM_DELAY_MS = 2600;
+static constexpr uint32_t DEMO_RESET_DELAY_MS = 3200;
+
+static constexpr uint32_t PARAM_POLL_INTERVAL_MS = 50;
+static bool autoupdateEnabled[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+static uint32_t lastParamPollMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+static uint8_t nextParamIndex[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+
+// Cache last seen values to support edge-triggered actions.
+static bool lastValueValid[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
+static ModuleParameterValue lastValue[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
+
+static const __FlashStringHelper *commandToString(ModuleMessageId id)
+{
+    switch (id)
+    {
+    case ModuleMessageId::CMD_PING:
+        return F("PING");
+    case ModuleMessageId::CMD_GET_PROPERTIES:
+        return F("GET_PROPERTIES");
+    case ModuleMessageId::CMD_SET_PARAMETER:
+        return F("SET_PARAMETER");
+    case ModuleMessageId::CMD_GET_PARAMETER:
+        return F("GET_PARAMETER");
+    case ModuleMessageId::CMD_RESET_MODULE:
+        return F("RESET_MODULE");
+    case ModuleMessageId::CMD_SET_AUTOUPDATE:
+        return F("SET_AUTOUPDATE");
+    case ModuleMessageId::CMD_RESPONSE:
+        return F("RESPONSE");
+    default:
+        return F("UNKNOWN");
+    }
+}
+
+static bool parseValueFromResponse(const Port *port, uint8_t pid, const ModuleMessageResponsePayload &resp, ModuleParameterValue &outValue)
+{
+    if (!port || !port->hasModule)
+        return false;
+    if (pid >= port->module.parameterCount)
+        return false;
+    const ModuleParameterDataType dt = port->module.parameters[pid].dataType;
+
+    const uint8_t *data = &resp.payload[1];
+    const uint16_t len = (resp.payloadLength > 1) ? static_cast<uint16_t>(resp.payloadLength - 1) : 0;
+
+    switch (dt)
+    {
+    case ModuleParameterDataType::PARAM_TYPE_BOOL:
+        if (len < 1)
+            return false;
+        outValue.boolValue = data[0] ? 1 : 0;
+        return true;
+    case ModuleParameterDataType::PARAM_TYPE_INT:
+        if (len < sizeof(int32_t))
+            return false;
+        memcpy(&outValue.intValue, data, sizeof(int32_t));
+        return true;
+    case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+        if (len < sizeof(float))
+            return false;
+        memcpy(&outValue.floatValue, data, sizeof(float));
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool valueEquals(ModuleParameterDataType dt, const ModuleParameterValue &a, const ModuleParameterValue &b)
+{
+    switch (dt)
+    {
+    case ModuleParameterDataType::PARAM_TYPE_BOOL:
+        return a.boolValue == b.boolValue;
+    case ModuleParameterDataType::PARAM_TYPE_INT:
+        return a.intValue == b.intValue;
+    case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+        return memcmp(&a.floatValue, &b.floatValue, sizeof(float)) == 0;
+    default:
+        return false;
+    }
+}
+
+static uint8_t scaleToMidi7(const Port *port, uint8_t pid, ModuleParameterDataType dt, const ModuleParameterValue &v)
+{
+    if (!port || !port->hasModule || pid >= port->module.parameterCount)
+        return 0;
+    const ModuleParameter &p = port->module.parameters[pid];
+
+    if (dt == ModuleParameterDataType::PARAM_TYPE_BOOL)
+    {
+        return v.boolValue ? 127 : 0;
+    }
+    if (dt == ModuleParameterDataType::PARAM_TYPE_INT)
+    {
+        const int32_t mn = p.minMax.intMin;
+        const int32_t mx = p.minMax.intMax;
+        if (mx <= mn)
+            return static_cast<uint8_t>(v.intValue & 0x7F);
+        int32_t clamped = v.intValue;
+        if (clamped < mn)
+            clamped = mn;
+        if (clamped > mx)
+            clamped = mx;
+        const int32_t num = (clamped - mn) * 127;
+        const int32_t den = (mx - mn);
+        return static_cast<uint8_t>(num / den);
+    }
+    if (dt == ModuleParameterDataType::PARAM_TYPE_FLOAT)
+    {
+        const float mn = p.minMax.floatMin;
+        const float mx = p.minMax.floatMax;
+        if (mx <= mn)
+        {
+            float f = v.floatValue;
+            if (f < 0)
+                f = 0;
+            if (f > 127)
+                f = 127;
+            return static_cast<uint8_t>(f);
+        }
+        float f = v.floatValue;
+        if (f < mn)
+            f = mn;
+        if (f > mx)
+            f = mx;
+        const float norm = (f - mn) / (mx - mn);
+        float out = norm * 127.0f;
+        if (out < 0)
+            out = 0;
+        if (out > 127)
+            out = 127;
+        return static_cast<uint8_t>(out);
+    }
+    return 0;
+}
+
+static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterDataType dt, const ModuleParameterValue &cur, const ModuleParameterValue *prev)
+{
+    if (!port)
+        return;
+
+    const ModuleMapping *m = MappingManager::findMapping(port->row, port->col, pid);
+    if (!m || m->type == ACTION_NONE)
+        return;
+
+    const bool hadPrev = (prev != nullptr);
+    const bool curBool = (dt == ModuleParameterDataType::PARAM_TYPE_BOOL) ? (cur.boolValue != 0) : (cur.intValue != 0);
+    const bool prevBool = hadPrev ? ((dt == ModuleParameterDataType::PARAM_TYPE_BOOL) ? (prev->boolValue != 0) : (prev->intValue != 0)) : false;
+
+    switch (m->type)
+    {
+    case ACTION_MIDI_NOTE:
+    {
+        // Channel is stored as 1-16 in mapping; usb expects 0-15.
+        uint8_t ch = m->target.midiNote.channel;
+        if (ch > 0)
+            ch -= 1;
+        const uint8_t note = m->target.midiNote.noteNumber;
+        const uint8_t vel = m->target.midiNote.velocity ? m->target.midiNote.velocity : 127;
+
+        if (!hadPrev || curBool != prevBool)
+        {
+            if (curBool)
+                usb::sendMidiNoteOn(ch, note, vel);
+            else
+                usb::sendMidiNoteOff(ch, note, vel);
+        }
+        break;
+    }
+    case ACTION_MIDI_CC:
+    {
+        uint8_t ch = m->target.midiCC.channel;
+        if (ch > 0)
+            ch -= 1;
+        const uint8_t cc = m->target.midiCC.ccNumber;
+        const uint8_t value = scaleToMidi7(port, pid, dt, cur);
+        usb::sendMidiCC(ch, cc, value);
+        break;
+    }
+    case ACTION_KEYBOARD:
+    {
+        // Only fire on rising edge for booleans.
+        if (!hadPrev || (curBool && !prevBool))
+        {
+            usb::sendKeypress(m->target.keyboard.keycode, m->target.keyboard.modifier);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void printHexBytes(const uint8_t *data, uint16_t len, uint16_t maxBytes = 16)
+{
+    if (!data || len == 0)
+    {
+        UsbSerial.print(F("<empty>"));
+        return;
+    }
+    uint16_t toPrint = len;
+    if (toPrint > maxBytes)
+        toPrint = maxBytes;
+    for (uint16_t i = 0; i < toPrint; i++)
+    {
+        if (data[i] < 0x10)
+            UsbSerial.print('0');
+        UsbSerial.print(data[i], HEX);
+        if (i + 1 < toPrint)
+            UsbSerial.print(' ');
+    }
+    if (len > toPrint)
+        UsbSerial.print(F(" ..."));
+}
+
+static void printMessageHuman(const ModuleMessage &msg, Port *port)
+{
+    UsbSerial.print(F("[MSG] Port "));
+    UsbSerial.print(msg.moduleRow);
+    UsbSerial.print(',');
+    UsbSerial.print(msg.moduleCol);
+    UsbSerial.print(F(" type="));
+    UsbSerial.print(commandToString(msg.commandId));
+    UsbSerial.print(F(" (0x"));
+    UsbSerial.print(static_cast<uint8_t>(msg.commandId), HEX);
+    UsbSerial.print(F(") len="));
+    UsbSerial.print(msg.payloadLength);
+
+    switch (msg.commandId)
+    {
+    case ModuleMessageId::CMD_PING:
+        if (msg.payloadLength >= sizeof(ModuleMessagePingPayload))
+        {
+            ModuleMessagePingPayload p{};
+            memcpy(&p, msg.payload, sizeof(p));
+            UsbSerial.print(F(" magic=0x"));
+            UsbSerial.print(p.magic, HEX);
+        }
+        break;
+    case ModuleMessageId::CMD_GET_PROPERTIES:
+        if (msg.payloadLength >= 1)
+        {
+            UsbSerial.print(F(" requestId="));
+            UsbSerial.print(msg.payload[0]);
+        }
+        break;
+    case ModuleMessageId::CMD_SET_PARAMETER:
+        if (msg.payloadLength >= sizeof(ModuleMessageSetParameterPayload))
+        {
+            ModuleMessageSetParameterPayload p{};
+            memcpy(&p, msg.payload, sizeof(p));
+            UsbSerial.print(F(" paramId="));
+            UsbSerial.print(p.parameterId);
+            UsbSerial.print(F(" type="));
+            UsbSerial.print(static_cast<uint8_t>(p.dataType));
+            UsbSerial.print(F(" value="));
+            switch (p.dataType)
+            {
+            case ModuleParameterDataType::PARAM_TYPE_INT:
+                UsbSerial.print(p.value.intValue);
+                break;
+            case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+                UsbSerial.print(p.value.floatValue);
+                break;
+            case ModuleParameterDataType::PARAM_TYPE_BOOL:
+                UsbSerial.print(static_cast<int>(p.value.boolValue));
+                break;
+            default:
+                UsbSerial.print(F("?"));
+                break;
+            }
+        }
+        break;
+    case ModuleMessageId::CMD_GET_PARAMETER:
+        if (msg.payloadLength >= sizeof(ModuleMessageGetParameterPayload))
+        {
+            ModuleMessageGetParameterPayload p{};
+            memcpy(&p, msg.payload, sizeof(p));
+            UsbSerial.print(F(" paramId="));
+            UsbSerial.print(p.parameterId);
+        }
+        break;
+    case ModuleMessageId::CMD_RESET_MODULE:
+        if (msg.payloadLength >= sizeof(ModuleMessageResetPayload))
+        {
+            ModuleMessageResetPayload p{};
+            memcpy(&p, msg.payload, sizeof(p));
+            UsbSerial.print(F(" magic=0x"));
+            UsbSerial.print(p.magic, HEX);
+        }
+        break;
+    case ModuleMessageId::CMD_RESPONSE:
+        if (msg.payloadLength >= 4)
+        {
+            ModuleMessageResponsePayload resp{};
+            uint16_t copyLen = msg.payloadLength;
+            if (copyLen > sizeof(resp))
+                copyLen = sizeof(resp);
+            memcpy(&resp, msg.payload, copyLen);
+
+            UsbSerial.print(F(" status="));
+            UsbSerial.print(static_cast<uint8_t>(resp.status));
+            UsbSerial.print(F(" inRespTo="));
+            UsbSerial.print(commandToString(resp.inResponseTo));
+            UsbSerial.print(F(" payloadBytes="));
+            UsbSerial.print(resp.payloadLength);
+
+            if (resp.inResponseTo == ModuleMessageId::CMD_GET_PROPERTIES &&
+                resp.status == ModuleStatus::MODULE_STATUS_OK &&
+                resp.payloadLength >= sizeof(ModuleMessageGetPropertiesPayload))
+            {
+                ModuleMessageGetPropertiesPayload props;
+                memcpy(&props, resp.payload, sizeof(props));
+                UsbSerial.print(F(" name=\""));
+                UsbSerial.print(props.module.name);
+                UsbSerial.print(F("\" mfg=\""));
+                UsbSerial.print(props.module.manufacturer);
+                UsbSerial.print(F("\" fw=\""));
+                UsbSerial.print(props.module.fwVersion);
+                UsbSerial.print(F("\" params="));
+                UsbSerial.print(props.module.parameterCount);
+            }
+            else if (resp.inResponseTo == ModuleMessageId::CMD_GET_PARAMETER &&
+                     resp.status == ModuleStatus::MODULE_STATUS_OK &&
+                     resp.payloadLength >= 1)
+            {
+                uint8_t pid = resp.payload[0];
+                UsbSerial.print(F(" paramId="));
+                UsbSerial.print(pid);
+                UsbSerial.print(F(" valueBytes="));
+                if (resp.payloadLength > 1)
+                {
+                    printHexBytes(&resp.payload[1], static_cast<uint16_t>(resp.payloadLength - 1));
+                }
+                else
+                {
+                    UsbSerial.print(F("<none>"));
+                }
+            }
+            else
+            {
+                UsbSerial.print(F(" data="));
+                printHexBytes(resp.payload, resp.payloadLength);
+            }
+        }
+        break;
+    default:
+        break;
+    }
+
+    // UsbSerial.print(F(" raw="));
+    // printHexBytes(msg.payload, msg.payloadLength);
+
+    if (port && port->hasModule)
+    {
+        UsbSerial.print(F(" module=\""));
+        UsbSerial.print(port->module.name);
+        UsbSerial.print(F("\""));
+    }
+    UsbSerial.println();
+}
+
+void setup1()
+{
+    initPorts();
+    runtime_config::init();
+    runtime_query::init();
+    MappingManager::init();
+    UsbSerial.println(F("piControl: core1 module scan ready"));
+}
+
+void loop1()
+{
+    scanPorts();
+
+    uint32_t now = millis();
+
+    // Serve async queries from core0.
+    runtime_query::Request q;
+    while (runtime_query::tryDequeue(q))
+    {
+        if (q.type == runtime_query::RequestType::LIST_MODULES)
+        {
+            // Header includes grid size so the UI can render empty ports.
+            UsbSerial.print(F("ok ports rows="));
+            UsbSerial.print(MODULE_PORT_ROWS);
+            UsbSerial.print(F(" cols="));
+            UsbSerial.println(MODULE_PORT_COLS);
+
+            for (int r = 0; r < MODULE_PORT_ROWS; r++)
+            {
+                for (int c = 0; c < MODULE_PORT_COLS; c++)
+                {
+                    Port *p = getPort(r, c);
+                    if (!p)
+                        continue;
+
+                    // Always emit port line.
+                    UsbSerial.print(F("port r="));
+                    UsbSerial.print(r);
+                    UsbSerial.print(F(" c="));
+                    UsbSerial.print(c);
+                    UsbSerial.print(F(" configured="));
+                    UsbSerial.print(p->configured ? 1 : 0);
+                    UsbSerial.print(F(" hasModule="));
+                    UsbSerial.print(p->hasModule ? 1 : 0);
+                    UsbSerial.print(F(" orientation="));
+                    UsbSerial.println((uint8_t)p->orientation);
+
+                    if (!p->configured || !p->hasModule)
+                        continue;
+
+                    UsbSerial.print(F("module r="));
+                    UsbSerial.print(r);
+                    UsbSerial.print(F(" c="));
+                    UsbSerial.print(c);
+                    UsbSerial.print(F(" type="));
+                    UsbSerial.print((uint8_t)p->module.type);
+                    UsbSerial.print(F(" caps="));
+                    UsbSerial.print(p->module.capabilities);
+                    UsbSerial.print(F(" name=\""));
+                    UsbSerial.print(p->module.name);
+                    UsbSerial.print(F("\" mfg=\""));
+                    UsbSerial.print(p->module.manufacturer);
+                    UsbSerial.print(F("\" fw=\""));
+                    UsbSerial.print(p->module.fwVersion);
+                    UsbSerial.print(F("\" params="));
+                    UsbSerial.println(p->module.parameterCount);
+
+                    const uint8_t pc = p->module.parameterCount;
+                    for (uint8_t pid = 0; pid < pc && pid < 32; pid++)
+                    {
+                        const ModuleParameter &mp = p->module.parameters[pid];
+                        UsbSerial.print(F("param r="));
+                        UsbSerial.print(r);
+                        UsbSerial.print(F(" c="));
+                        UsbSerial.print(c);
+                        UsbSerial.print(F(" pid="));
+                        UsbSerial.print(mp.id);
+                        UsbSerial.print(F(" dt="));
+                        UsbSerial.print((uint8_t)mp.dataType);
+                        UsbSerial.print(F(" name=\""));
+                        UsbSerial.print(mp.name);
+                        UsbSerial.print(F("\""));
+
+                        // Min/max/value are type-dependent.
+                        switch (mp.dataType)
+                        {
+                        case ModuleParameterDataType::PARAM_TYPE_BOOL:
+                            UsbSerial.print(F(" min=0 max=1 value="));
+                            UsbSerial.print((int)mp.value.boolValue);
+                            break;
+                        case ModuleParameterDataType::PARAM_TYPE_INT:
+                            UsbSerial.print(F(" min="));
+                            UsbSerial.print(mp.minMax.intMin);
+                            UsbSerial.print(F(" max="));
+                            UsbSerial.print(mp.minMax.intMax);
+                            UsbSerial.print(F(" value="));
+                            UsbSerial.print(mp.value.intValue);
+                            break;
+                        case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+                            UsbSerial.print(F(" min="));
+                            UsbSerial.print(mp.minMax.floatMin, 6);
+                            UsbSerial.print(F(" max="));
+                            UsbSerial.print(mp.minMax.floatMax, 6);
+                            UsbSerial.print(F(" value="));
+                            UsbSerial.print(mp.value.floatValue, 6);
+                            break;
+                        default:
+                            break;
+                        }
+                        UsbSerial.println();
+                    }
+                }
+            }
+
+            UsbSerial.println(F("ok modules done"));
+        }
+    }
+
+    // Apply any host requests coming from core0 (CDC config).
+    runtime_config::AutoupdateRequest req;
+    while (runtime_config::tryDequeueAutoupdate(req))
+    {
+        if (req.applyToAll)
+        {
+            for (int r = 0; r < MODULE_PORT_ROWS; r++)
+            {
+                for (int c = 0; c < MODULE_PORT_COLS; c++)
+                {
+                    Port *p = getPort(r, c);
+                    if (!p || !p->configured)
+                        continue;
+                    sendSetAutoupdate(r, c, req.enable != 0, req.intervalMs);
+                    autoupdateEnabled[r][c] = req.enable != 0;
+                }
+            }
+        }
+        else
+        {
+            Port *p = getPort(req.row, req.col);
+            if (p && p->configured)
+            {
+                sendSetAutoupdate(req.row, req.col, req.enable != 0, req.intervalMs);
+                autoupdateEnabled[req.row][req.col] = req.enable != 0;
+            }
+        }
+    }
+
+    for (int r = 0; r < MODULE_PORT_ROWS; r++)
+    {
+        for (int c = 0; c < MODULE_PORT_COLS; c++)
+        {
+            Port *p = getPort(r, c);
+            if (!p || !p->configured)
+            {
+                propsRequested[r][c] = false;
+                connectionTime[r][c] = 0;
+                lastPingMs[r][c] = 0;
+                autoupdateEnabled[r][c] = false;
+                lastParamPollMs[r][c] = 0;
+                nextParamIndex[r][c] = 0;
+                for (int i = 0; i < 32; i++)
+                {
+                    lastValueValid[r][c][i] = false;
+                }
+                continue;
+            }
+
+            if (!propsRequested[r][c])
+            {
+                sendGetProperties(r, c, 0);
+                propsRequested[r][c] = true;
+                connectionTime[r][c] = now;
+            }
+
+            // Polling mode: ask for one parameter per tick.
+            if (!autoupdateEnabled[r][c] && p->hasModule && p->module.parameterCount > 0)
+            {
+                if (now - lastParamPollMs[r][c] >= PARAM_POLL_INTERVAL_MS)
+                {
+                    uint8_t pid = nextParamIndex[r][c];
+                    if (pid >= p->module.parameterCount)
+                        pid = 0;
+                    sendGetParameter(r, c, pid);
+                    nextParamIndex[r][c] = static_cast<uint8_t>(pid + 1);
+                    lastParamPollMs[r][c] = now;
+                }
+            }
+        }
+    }
+
+    static ModuleMessage msg;
+    while (getNextMessage(msg))
+    {
+        Port *port = getPort(msg.moduleRow, msg.moduleCol);
+
+        if (msg.commandId == ModuleMessageId::CMD_RESPONSE && msg.payloadLength >= 4)
+        {
+            ModuleMessageResponsePayload resp{};
+            uint16_t copyLen = msg.payloadLength;
+            if (copyLen > sizeof(resp))
+                copyLen = sizeof(resp);
+            memcpy(&resp, msg.payload, copyLen);
+
+            if (port && resp.status == ModuleStatus::MODULE_STATUS_OK &&
+                resp.inResponseTo == ModuleMessageId::CMD_GET_PROPERTIES &&
+                resp.payloadLength >= sizeof(ModuleMessageGetPropertiesPayload))
+            {
+                static ModuleMessageGetPropertiesPayload props;
+                memcpy(&props, resp.payload, sizeof(props));
+                port->module = props.module;
+                port->module.portLocationRow = port->row;
+                port->module.portLocationCol = port->col;
+                port->hasModule = true;
+
+                // Prefer module-driven updates if the module advertises support.
+                if ((port->module.capabilities & MODULE_CAP_AUTOUPDATE) != 0)
+                {
+                    autoupdateEnabled[port->row][port->col] = true;
+                    sendSetAutoupdate(port->row, port->col, true, 0);
+                }
+                else
+                {
+                    autoupdateEnabled[port->row][port->col] = false;
+                }
+            }
+
+            // Treat any OK GET_PARAMETER response as a (possibly unsolicited) parameter update.
+            if (port && resp.status == ModuleStatus::MODULE_STATUS_OK &&
+                resp.inResponseTo == ModuleMessageId::CMD_GET_PARAMETER && resp.payloadLength >= 1)
+            {
+                const uint8_t pid = resp.payload[0];
+                if (port->hasModule && pid < port->module.parameterCount)
+                {
+                    const ModuleParameterDataType dt = port->module.parameters[pid].dataType;
+                    ModuleParameterValue cur{};
+                    if (parseValueFromResponse(port, pid, resp, cur))
+                    {
+                        ModuleParameterValue *prevPtr = nullptr;
+                        ModuleParameterValue prev{};
+                        if (lastValueValid[port->row][port->col][pid])
+                        {
+                            prev = lastValue[port->row][port->col][pid];
+                            prevPtr = &prev;
+                        }
+
+                        if (!prevPtr || !valueEquals(dt, cur, *prevPtr))
+                        {
+                            applyMappingToUsb(port, pid, dt, cur, prevPtr);
+                            lastValue[port->row][port->col][pid] = cur;
+                            lastValueValid[port->row][port->col][pid] = true;
+                        }
+                    }
+                }
+            }
+        }
+#ifdef DEBUG_MODULE_MESSAGES
+        printMessageHuman(msg, port);
+#endif
+    }
+
+    delay(10);
+}

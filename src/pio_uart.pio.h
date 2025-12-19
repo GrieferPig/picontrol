@@ -29,7 +29,7 @@ static const uint16_t pio_rx_program_instructions[] = {
 #if !PICO_NO_HARDWARE
 static const struct pio_program pio_rx_program = {
     .instructions = pio_rx_program_instructions,
-    .length = 11,
+    .length = 5,
     .origin = -1,
     .pio_version = pio_rx_pio_version,
 #if PICO_PIO_VERSION > 0

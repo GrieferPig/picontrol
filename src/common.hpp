@@ -3,14 +3,17 @@
 
 class InterruptSerialPIO;
 
-enum ModuleOrientation
+static constexpr uint16_t MODULE_MAX_PAYLOAD = 2048; // 2KB payloads
+
+enum ModuleOrientation : uint8_t
 {
     UP,
     RIGHT,
     DOWN,
     LEFT
 };
-enum ModuleType
+
+enum ModuleType : uint8_t
 {
     FADER = 0,
     KNOB = 1,
@@ -21,7 +24,7 @@ enum ModuleType
     PROXIMITY = 6
 };
 
-enum ModuleProtocol
+enum ModuleProtocol : uint8_t
 {
     PROTOCOL_UART = 0,
 };
@@ -34,26 +37,34 @@ enum ModuleStatus : uint8_t
     MODULE_STATUS_UNSUPPORTED = 2,
 };
 
-enum ModuleParameterDataType
+enum ModuleParameterDataType : uint8_t
 {
     PARAM_TYPE_INT = 0,
     PARAM_TYPE_FLOAT = 1,
     PARAM_TYPE_BOOL = 2,
 };
 
+// Module capability flags (bitmask)
+enum ModuleCapabilities : uint8_t
+{
+    MODULE_CAP_AUTOUPDATE = 1u << 0,
+};
+
+// On-wire payloads must be tightly packed
+#pragma pack(push, 1)
 union ModuleParameterValue
 {
-    int intValue;
+    int32_t intValue;
     float floatValue;
-    bool boolValue;
+    uint8_t boolValue;
 };
 
 union ModuleParameterMinMax
 {
     struct
     {
-        int intMin;
-        int intMax;
+        int32_t intMin;
+        int32_t intMax;
     };
     struct
     {
@@ -80,6 +91,7 @@ typedef struct
     char manufacturer[32];
     char fwVersion[16];
     uint8_t compatibleHostVersion;
+    uint8_t capabilities; // ModuleCapabilities bitmask
 
     uint8_t physicalSizeRow;
     uint8_t physicalSizeCol;
@@ -89,6 +101,7 @@ typedef struct
     uint8_t parameterCount;
     ModuleParameter parameters[32];
 } Module;
+#pragma pack(pop)
 
 typedef struct
 {
@@ -103,16 +116,21 @@ typedef struct
     // Runtime state
     InterruptSerialPIO *serial;
     bool configured;
+    uint8_t txPin;
+    uint8_t rxPin;
 } Port;
 
 // Module command structure
-typedef enum
+typedef enum : uint8_t
 {
     CMD_PING = 0x00,
     CMD_GET_PROPERTIES = 0x01,
     CMD_SET_PARAMETER = 0x02,
     CMD_GET_PARAMETER = 0x03,
     CMD_RESET_MODULE = 0x04,
+    // Enables module-driven updates: when enabled, host should stop polling.
+    // intervalMs==0 means "push only on change"; otherwise module may also push periodically.
+    CMD_SET_AUTOUPDATE = 0x05,
     CMD_RESPONSE = 0x80,
 } ModuleMessageId;
 
@@ -121,8 +139,8 @@ typedef struct
     uint8_t moduleRow;
     uint8_t moduleCol;
     ModuleMessageId commandId;
-    uint8_t payloadLength;
-    uint8_t payload[0xff];
+    uint16_t payloadLength;
+    uint8_t payload[MODULE_MAX_PAYLOAD];
 } ModuleMessage;
 
 // Host command structure.
@@ -136,6 +154,7 @@ typedef struct
 typedef struct
 {
     uint8_t requestId;
+    Module module; // Full descriptor to hydrate host-side Module
 } ModuleMessageGetPropertiesPayload;
 
 typedef struct
@@ -157,9 +176,18 @@ typedef struct
 
 typedef struct
 {
+    uint8_t enable;      // 0=disable (host polls), 1=enable (module pushes)
+    uint16_t intervalMs; // 0=on-change only
+} ModuleMessageSetAutoupdatePayload;
+
+typedef struct
+{
     ModuleStatus status;
     ModuleMessageId inResponseTo;
-    uint8_t payloadLength;
-    uint8_t payload[32];
+    uint16_t payloadLength;
+    uint8_t payload[MODULE_MAX_PAYLOAD - 4]; // total payload (including header fields) capped at 4KB
 } ModuleMessageResponsePayload;
 #pragma pack(pop)
+
+static_assert(sizeof(ModuleMessageGetPropertiesPayload) <= MODULE_MAX_PAYLOAD, "GetProperties payload exceeds protocol maximum");
+static_assert(sizeof(ModuleMessageResponsePayload) <= MODULE_MAX_PAYLOAD, "Response payload exceeds protocol maximum");
