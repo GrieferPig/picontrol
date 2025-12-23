@@ -5,7 +5,7 @@
 // Framing: 0xAA, commandId, payloadLenLo, payloadLenHi, payload..., checksum(sum of all prior bytes)
 static constexpr uint8_t FRAME_START = 0xAA;
 static constexpr uint32_t DETECTION_DEBOUNCE_MS = 10;
-static constexpr uint32_t PING_INTERVAL_MS = 200;
+static constexpr uint32_t PING_INTERVAL_MS = 500;
 static constexpr uint32_t RESPONSE_TIMEOUT_MS = 500;
 
 static Port ports[MODULE_PORT_ROWS][MODULE_PORT_COLS];

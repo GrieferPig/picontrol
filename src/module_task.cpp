@@ -464,9 +464,6 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
         break;
     }
 
-    // UsbSerial.print(F(" raw="));
-    // printHexBytes(msg.payload, msg.payloadLength);
-
     if (port && port->hasModule)
     {
         UsbSerial.print(F(" module=\""));
@@ -827,6 +824,9 @@ void loop1()
 
                         if (!prevPtr || !valueEquals(dt, cur, *prevPtr))
                         {
+                            // Update cached state so 'modules list' returns current values
+                            port->module.parameters[pid].value = cur;
+
                             applyMappingToUsb(port, pid, dt, cur, prevPtr);
                             lastValue[port->row][port->col][pid] = cur;
                             lastValueValid[port->row][port->col][pid] = true;

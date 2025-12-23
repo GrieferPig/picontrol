@@ -28,14 +28,14 @@
 class InterruptSerialPIO
 {
 public:
-    static constexpr uint32_t FIXED_BAUD = 460800;
+    static constexpr uint32_t FIXED_BAUD = 115200;
 
     volatile uint32_t lastByteReceivedTime;
 
     InterruptSerialPIO(pin_size_t tx, pin_size_t rx);
     ~InterruptSerialPIO();
 
-    // Fixed 460800 8N1
+    // Fixed 115200 8N1
     void begin(unsigned long baud = FIXED_BAUD);
     void end();
 

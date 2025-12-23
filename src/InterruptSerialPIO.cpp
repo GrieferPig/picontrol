@@ -206,13 +206,12 @@ void InterruptSerialPIO::end()
 }
 
 // Host TX are small command payloads (~10 bytes) so bit-banging is acceptable
-size_t InterruptSerialPIO::write(uint8_t c)
+size_t __not_in_flash_func(InterruptSerialPIO::write)(uint8_t c)
 {
     if (!_running || (_tx == NOPIN))
         return 0;
 
-    // Calculate cycles per bit (assuming 133MHz or 125MHz system clock)
-    // 460800 baud is approx 271 cycles at 125MHz
+    // Calculate cycles per bit
     const uint32_t bitCycles = clock_get_hz(clk_sys) / FIXED_BAUD;
 
     // Pre-calculate masks
@@ -222,12 +221,6 @@ size_t InterruptSerialPIO::write(uint8_t c)
 
     // Start Bit (Low)
     sio_hw->gpio_clr = pinMask;
-    uint32_t nextCycle = time_us_32() * (clock_get_hz(clk_sys) / 1000000); // Get current cycles approx
-    // Note: Better to use the SysTick or strictly timed loops if available,
-    // but for simplicity, use the SDK's busy_wait logic:
-
-    // Better simple implementation using busy_wait_at_least_cycles (from pico/time.h)
-    // Or just a tuned delay loop.
 
     // START BIT
     sio_hw->gpio_clr = pinMask;
