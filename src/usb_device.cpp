@@ -4,6 +4,7 @@
 #include <Adafruit_TinyUSB_API.h>
 #include <Adafruit_USBD_CDC.h>
 #include "tusb.h"
+#include <pico/multicore.h>
 #include <pico/util/queue.h>
 
 #include "mapping.h"
@@ -22,7 +23,7 @@ namespace
     struct LogChunk
     {
         uint16_t len;
-        uint8_t data[64];
+        uint8_t data[256];
     };
 
     struct MidiMsg
@@ -53,7 +54,9 @@ namespace
             return;
         }
 
-        queue_init(&g_logQ, sizeof(LogChunk), 64);
+        // CDC logs can be bursty (e.g. modules list). Keep a larger queue to avoid
+        // truncation when many small Print::write() calls happen quickly.
+        queue_init(&g_logQ, sizeof(LogChunk), 256);
         queue_init(&g_midiQ, sizeof(MidiMsg), 64);
         queue_init(&g_hidQ, sizeof(HidKeyMsg), 64);
         g_queuesInited = true;
@@ -87,14 +90,44 @@ namespace
     public:
         size_t write(uint8_t b) override
         {
-            return usb::enqueueCdcWrite(&b, 1);
+            const uint core = get_core_num() & 1u;
+            Pending &p = g_pending[core];
+
+            p.data[p.len++] = b;
+            if (p.len >= sizeof(p.data) || b == '\n')
+            {
+                flush(core);
+            }
+            return 1;
         }
 
         size_t write(const uint8_t *buffer, size_t size) override
         {
+            const uint core = get_core_num() & 1u;
+            flush(core);
             return usb::enqueueCdcWrite(buffer, size);
         }
+
+    private:
+        struct Pending
+        {
+            uint8_t len = 0;
+            uint8_t data[64]{};
+        };
+
+        static Pending g_pending[2];
+
+        static void flush(uint core)
+        {
+            Pending &p = g_pending[core & 1u];
+            if (p.len == 0)
+                return;
+            usb::enqueueCdcWrite(p.data, p.len);
+            p.len = 0;
+        }
     };
+
+    UsbSerialPrint::Pending UsbSerialPrint::g_pending[2];
 
     static UsbSerialPrint g_usbSerial;
 }
@@ -214,6 +247,8 @@ namespace usb
     //   map load
     //   autoupdate set <r> <c> <0|1> [intervalMs]
     //   autoupdate all <0|1> [intervalMs]
+    //   rot set <r> <c> <0|1>
+    //   rot all <0|1>
     void processCommand(char *cmd)
     {
         if (!cmd)
@@ -242,7 +277,13 @@ namespace usb
 
         if (strcmp(argv[0], "info") == 0)
         {
-            printlnOk("fw=picontrol proto=1");
+            printlnOk("fw=picontrol version=1.0.0 proto=1");
+            return;
+        }
+
+        if (strcmp(argv[0], "version") == 0)
+        {
+            printlnOk("1.0.0");
             return;
         }
 
@@ -408,6 +449,48 @@ namespace usb
             return;
         }
 
+        if (strcmp(argv[0], "rot") == 0)
+        {
+            if (argc >= 2 && strcmp(argv[1], "set") == 0)
+            {
+                if (argc < 5)
+                {
+                    printlnErr("usage: rot set r c 0|1");
+                    return;
+                }
+                long r, c;
+                uint8_t en;
+                if (!parseInt(argv[2], r) || !parseInt(argv[3], c) || !parseU8(argv[4], en))
+                {
+                    printlnErr("bad args");
+                    return;
+                }
+                const bool ok = runtime_config::enqueueRotationOverride((int)r, (int)c, en != 0);
+                printlnOk(ok ? "queued" : "queue_full");
+                return;
+            }
+            if (argc >= 2 && strcmp(argv[1], "all") == 0)
+            {
+                if (argc < 3)
+                {
+                    printlnErr("usage: rot all 0|1");
+                    return;
+                }
+                uint8_t en;
+                if (!parseU8(argv[2], en))
+                {
+                    printlnErr("bad args");
+                    return;
+                }
+                const bool ok = runtime_config::enqueueRotationOverrideAll(en != 0);
+                printlnOk(ok ? "queued" : "queue_full");
+                return;
+            }
+
+            printlnErr("unknown rot cmd");
+            return;
+        }
+
         if (strcmp(argv[0], "modules") == 0)
         {
             if (argc >= 2 && strcmp(argv[1], "list") == 0)
@@ -417,6 +500,33 @@ namespace usb
                 return;
             }
             printlnErr("usage: modules list");
+            return;
+        }
+
+        if (strcmp(argv[0], "param") == 0)
+        {
+            if (argc >= 2 && strcmp(argv[1], "set") == 0)
+            {
+                // param set <r> <c> <pid> <datatype> <value>
+                // datatype: 0=int, 1=float, 2=bool
+                if (argc < 7)
+                {
+                    printlnErr("usage: param set r c pid datatype value");
+                    return;
+                }
+                long r, c;
+                uint8_t pid, dt;
+                if (!parseInt(argv[2], r) || !parseInt(argv[3], c) ||
+                    !parseU8(argv[4], pid) || !parseU8(argv[5], dt))
+                {
+                    printlnErr("bad args");
+                    return;
+                }
+                const bool ok = runtime_config::enqueueSetParameter((int)r, (int)c, pid, dt, argv[6]);
+                printlnOk(ok ? "queued" : "queue_full");
+                return;
+            }
+            printlnErr("usage: param set r c pid datatype value");
             return;
         }
 
@@ -432,12 +542,24 @@ namespace usb
         if (tud_cdc_connected())
         {
             LogChunk chunk;
-            while (queue_try_remove(&g_logQ, &chunk))
+            while (queue_try_peek(&g_logQ, &chunk))
             {
-                if (chunk.len)
+                if (chunk.len == 0)
                 {
-                    tud_cdc_write(chunk.data, chunk.len);
+                    (void)queue_try_remove(&g_logQ, &chunk);
+                    continue;
                 }
+
+                // Avoid partial writes: tud_cdc_write() can return short if the
+                // USB TX buffer is full. If we drop the remainder, log lines get
+                // randomly truncated (e.g. missing param lines in modules list).
+                if (tud_cdc_write_available() < chunk.len)
+                {
+                    break;
+                }
+
+                (void)queue_try_remove(&g_logQ, &chunk);
+                tud_cdc_write(chunk.data, chunk.len);
             }
             tud_cdc_write_flush();
         }
@@ -486,11 +608,11 @@ namespace usb
             }
         }
 
-        // Drain HID keyboard
+        // Drain HID keyboard (one message per task tick to ensure host sees press/release)
         if (tud_hid_ready())
         {
             HidKeyMsg k;
-            while (queue_try_remove(&g_hidQ, &k))
+            if (queue_try_remove(&g_hidQ, &k))
             {
                 uint8_t keycodes[6] = {0, 0, 0, 0, 0, 0};
                 if (k.keycode)

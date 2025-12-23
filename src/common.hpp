@@ -48,6 +48,7 @@ enum ModuleParameterDataType : uint8_t
 enum ModuleCapabilities : uint8_t
 {
     MODULE_CAP_AUTOUPDATE = 1u << 0,
+    MODULE_CAP_ROTATION_AWARE = 1u << 1, // When rotated 180°, flip output values using min/max (except bool)
 };
 
 // On-wire payloads must be tightly packed

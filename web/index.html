@@ -4,645 +4,464 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>piControl Config</title>
+    <title>piControl Control Panel</title>
     <style>
         :root {
-            --bg: #1a1a1a;
-            --fg: #e0e0e0;
-            --panel: #2d2d2d;
-            --accent: #007acc;
-            --border: #404040;
+            --bg: #0f1115;
+            --fg: #e5e7eb;
+            --muted: #9ca3af;
+            --panel: #161922;
+            --panel-strong: #1f2330;
+            --border: #262a38;
+            --accent: #3fa9f5;
+            --accent-2: #f5a33f;
+        }
+
+        * {
+            box-sizing: border-box;
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: var(--bg);
+            font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+            background: radial-gradient(circle at 10% 20%, rgba(63, 169, 245, 0.08), transparent 35%),
+                radial-gradient(circle at 80% 0%, rgba(245, 163, 63, 0.08), transparent 30%),
+                var(--bg);
             color: var(--fg);
             margin: 0;
             padding: 20px;
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
-            height: 100vh;
-            box-sizing: border-box;
+            gap: 16px;
         }
 
         h1,
         h2,
         h3 {
-            margin-top: 0;
+            margin: 0;
+            font-weight: 600;
+        }
+
+        p {
+            margin: 0;
         }
 
         button {
-            background: var(--panel);
+            background: var(--panel-strong);
             color: var(--fg);
             border: 1px solid var(--border);
-            padding: 8px 16px;
+            padding: 8px 12px;
             cursor: pointer;
-            border-radius: 4px;
+            border-radius: 6px;
+            transition: transform 80ms ease, background 120ms ease, border-color 120ms ease;
         }
 
         button:hover {
-            background: #3d3d3d;
+            background: #23283a;
+        }
+
+        button:active {
+            transform: translateY(1px);
         }
 
         button.primary {
-            background: var(--accent);
-            border-color: var(--accent);
-            color: white;
+            background: linear-gradient(135deg, var(--accent), #2a8bd7);
+            border-color: #2a8bd7;
+            color: #fff;
+        }
+
+        button.ghost {
+            background: transparent;
+        }
+
+        .toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: #0c0f18;
+            color: var(--muted);
+            font-size: 13px;
+            white-space: nowrap;
+            user-select: none;
+        }
+
+        .toggle input {
+            accent-color: var(--accent);
         }
 
         .toolbar {
             display: flex;
+            flex-wrap: nowrap;
             gap: 10px;
-            margin-bottom: 20px;
             align-items: center;
-            padding: 10px;
+            padding: 12px 14px;
             background: var(--panel);
-            border-radius: 6px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+            overflow-x: auto;
         }
 
         .status {
-            font-family: monospace;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 13px;
+            padding: 6px 10px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            background: #0c0d12;
+            color: var(--muted);
             margin-left: auto;
-            color: #888;
         }
 
         .status.connected {
-            color: #4caf50;
+            color: #34d399;
+            border-color: rgba(52, 211, 153, 0.35);
+            background: rgba(52, 211, 153, 0.08);
         }
 
         .main-layout {
             display: grid;
-            grid-template-columns: 300px 1fr;
-            gap: 20px;
+            grid-template-columns: 340px 1fr;
+            gap: 16px;
             flex: 1;
             min-height: 0;
         }
 
-        .sidebar {
-            background: var(--panel);
-            padding: 15px;
-            border-radius: 6px;
-            overflow-y: auto;
+        .stack {
             display: flex;
             flex-direction: column;
+            gap: 12px;
+            min-height: 0;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+        }
+
+        .panel h2 {
+            font-size: 16px;
+            letter-spacing: 0.3px;
+            color: #d8dee9;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel small {
+            color: var(--muted);
+            font-weight: 500;
+        }
+
+        .grid-shell {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 0;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+        }
+
+        .grid-header {
+            display: flex;
+            align-items: center;
             gap: 10px;
+        }
+
+        .grid-header .hint {
+            color: var(--muted);
+            font-size: 13px;
         }
 
         .grid-view {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            /* Assuming 4 cols max */
             gap: 10px;
-            padding: 20px;
-            background: #222;
-            border-radius: 6px;
-            overflow-y: auto;
+            background: #11131a;
+            border: 1px dashed var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            overflow: auto;
+            min-height: 260px;
             align-content: start;
         }
 
         .module-card {
-            background: var(--panel);
+            background: var(--panel-strong);
             border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 10px;
-            min-height: 100px;
+            border-radius: 10px;
+            padding: 10px 10px 8px;
             display: flex;
             flex-direction: column;
-            gap: 5px;
+            gap: 6px;
+            min-height: 110px;
+            transition: border-color 120ms ease, transform 80ms ease;
         }
 
+        .module-card:hover {
+            border-color: rgba(63, 169, 245, 0.4);
+            transform: translateY(-1px);
+        }
+
+        .module-card.noport,
         .module-card.empty {
-            opacity: 0.5;
+            border-style: dashed;
+            color: var(--muted);
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            background: #141820;
+        }
+
+        .module-card.covered {
+            background: #171b28;
             border-style: dashed;
             justify-content: center;
-            align-items: center;
+            text-align: center;
+        }
+
+        .module-card.noport:hover,
+        .module-card.empty:hover,
+        .module-card.covered:hover {
+            border-color: var(--border);
+            transform: none;
+        }
+
+        .mini {
+            padding: 4px 8px;
+            font-size: 12px;
+            border-radius: 8px;
         }
 
         .module-card h3 {
-            font-size: 14px;
             margin: 0;
-            color: var(--accent);
+            font-size: 14px;
+            letter-spacing: 0.2px;
+            color: #c7e3ff;
         }
 
-        .module-card .loc {
+        .module-meta {
+            display: flex;
+            justify-content: space-between;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .loc {
+            color: var(--muted);
             font-size: 11px;
-            color: #888;
         }
 
         .param-list {
-            margin-top: 5px;
             display: flex;
             flex-direction: column;
             gap: 4px;
         }
 
         .param-item {
-            font-size: 12px;
-            padding: 4px;
-            background: #333;
-            border-radius: 3px;
-            cursor: pointer;
             display: flex;
             justify-content: space-between;
+            align-items: center;
+            padding: 6px 8px;
+            background: #1c2030;
+            border-radius: 7px;
+            border: 1px solid transparent;
+            font-size: 12px;
+            cursor: pointer;
+            transition: border-color 120ms ease, background 120ms ease;
         }
 
         .param-item:hover {
-            background: #444;
+            border-color: rgba(63, 169, 245, 0.35);
         }
 
         .param-item.selected {
-            border: 1px solid var(--accent);
+            border-color: var(--accent);
+            background: rgba(63, 169, 245, 0.08);
         }
 
         .param-item .val {
-            font-family: monospace;
-            color: #aaa;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            color: #d1d5db;
         }
 
         .editor-panel {
-            background: var(--panel);
-            padding: 15px;
-            border-radius: 6px;
-            display: none;
-            /* Hidden until param selected */
-        }
-
-        .editor-panel.visible {
-            display: block;
+            display: grid;
+            gap: 10px;
         }
 
         .form-group {
-            margin-bottom: 10px;
+            display: grid;
+            gap: 4px;
         }
 
         .form-group label {
-            display: block;
             font-size: 12px;
-            margin-bottom: 4px;
-            color: #aaa;
+            color: var(--muted);
+            letter-spacing: 0.2px;
         }
 
-        .form-group select,
-        .form-group input {
+        .form-group input,
+        .form-group select {
             width: 100%;
-            padding: 6px;
-            background: #1a1a1a;
+            padding: 8px 10px;
+            border-radius: 7px;
             border: 1px solid var(--border);
+            background: #0f121a;
             color: var(--fg);
-            border-radius: 3px;
-            box-sizing: border-box;
+            font-size: 13px;
         }
 
-        #log {
-            font-family: monospace;
-            font-size: 11px;
-            height: 100px;
-            overflow-y: auto;
-            background: #000;
-            padding: 5px;
-            border-radius: 4px;
-            margin-top: auto;
+        .field-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .button-row {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .log {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 12px;
+            background: #05060a;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px;
+            height: 140px;
+            overflow: auto;
+        }
+
+        .muted {
+            color: var(--muted);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background: #0c0f18;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            font-size: 12px;
+        }
+
+        .badge strong {
+            color: #fff;
+        }
+
+        .hint-card {
+            border: 1px dashed var(--border);
+            background: rgba(63, 169, 245, 0.05);
+            border-radius: 10px;
+            padding: 10px;
+            font-size: 13px;
+            color: var(--muted);
+            line-height: 1.4;
+        }
+
+        @media (max-width: 960px) {
+            body {
+                padding: 14px;
+            }
+
+            .main-layout {
+                grid-template-columns: 1fr;
+            }
+
+            /* Keep toolbar in one line on small screens too */
+            .toolbar {
+                flex-wrap: nowrap;
+            }
         }
     </style>
 </head>
 
 <body>
-
     <div class="toolbar">
         <button id="btnConnect" class="primary">Connect Device</button>
-        <button id="btnRefresh">Refresh Mappings</button>
+        <button id="btnRefresh">Refresh</button>
         <button id="btnSave">Save to Flash</button>
+        <button id="btnClear" class="ghost">Clear UI</button>
+        <label class="toggle" title="When enabled, commands are handled locally (no WebSerial)">
+            <input id="toggleMock" type="checkbox">
+            Mock Mode
+        </label>
         <div class="status" id="status">Disconnected</div>
     </div>
 
     <div class="main-layout">
-        <div class="sidebar">
-            <h2>Mapping Editor</h2>
-            <div id="editor" class="editor-panel">
-                <div class="form-group">
-                    <label>Selected Parameter</label>
-                    <input type="text" id="editTargetName" readonly disabled>
-                </div>
-                <div class="form-group">
-                    <label>Action Type</label>
-                    <select id="editType">
-                        <option value="0">None</option>
-                        <option value="1">MIDI Note</option>
-                        <option value="2">MIDI CC</option>
-                        <option value="3">Keyboard</option>
-                    </select>
-                </div>
+        <div class="stack">
+            <div class="panel">
+                <h2>
+                    Parameter Control
+                    <small id="paramPanelLabel" class="muted">Select a module</small>
+                </h2>
+                <div id="paramPanel" class="editor-panel" style="display:none"></div>
+                <div id="paramPanelEmpty" class="hint-card">Select a module from the grid to view parameters.</div>
+            </div>
 
-                <!-- MIDI Fields -->
-                <div id="groupMidi" style="display:none">
-                    <div class="form-group">
-                        <label>Channel (1-16)</label>
-                        <input type="number" id="editCh" min="1" max="16" value="1">
-                    </div>
-                    <div class="form-group">
-                        <label>Note/CC Number (0-127)</label>
-                        <input type="number" id="editNum" min="0" max="127" value="0">
-                    </div>
-                </div>
+            <div class="panel">
+                <h2>
+                    Mapping Editor
+                    <small id="selectionLabel" class="muted">Select a parameter</small>
+                </h2>
+                <div id="editor" class="editor-panel" style="display:none"></div>
+                <div id="editorEmpty" class="hint-card">Pick a parameter from the grid to edit its action.</div>
+            </div>
 
-                <!-- Keyboard Fields -->
-                <div id="groupKey" style="display:none">
-                    <div class="form-group">
-                        <label>HID Keycode</label>
-                        <input type="number" id="editKey" min="0" max="255" value="4">
-                    </div>
-                    <div class="form-group">
-                        <label>Modifier Mask</label>
-                        <input type="number" id="editMod" min="0" max="255" value="0">
-                    </div>
+            <div class="panel" id="mockPanel" style="display:none;">
+                <h2>
+                    Mock & Test
+                    <small class="muted">No hardware? Load demo data.</small>
+                </h2>
+                <div class="button-row" style="margin-bottom:8px;">
+                    <button id="btnMockLoad" class="primary">Load Mock Grid</button>
+                    <button id="btnMockPulse">Start Value Stream</button>
                 </div>
-
-                <div style="display:flex; gap:10px; margin-top:15px;">
-                    <button id="btnApply" class="primary" style="flex:1">Apply</button>
-                    <button id="btnDelete" style="flex:1; background:#a33; border-color:#a33">Delete</button>
+                <div class="button-row">
+                    <button id="btnMockStop" class="ghost">Stop Stream</button>
+                    <button id="btnMockMappings" class="ghost">Mock Mappings</button>
+                </div>
+                <div class="hint-card" style="margin-top:10px;">
+                    The mock tool feeds the parser with the same lines firmware emits
+                    (<span class="muted">ok ports / module / param / map</span>) so you can test the UI without a
+                    device.
                 </div>
             </div>
-            <div id="log"></div>
+
+            <div class="panel">
+                <h2>Log</h2>
+                <div id="log" class="log"></div>
+            </div>
         </div>
 
-        <div class="grid-view" id="grid">
-            <!-- Modules injected here -->
-            <div style="grid-column: 1/-1; text-align: center; color: #666; padding: 40px;">
-                Connect to device to see modules...
+        <div class="grid-shell">
+            <div class="grid-header">
+                <div class="badge"><span>Ports</span><strong id="portCount">0x0</strong></div>
+                <div class="badge"><span>Mappings</span><strong id="mappingCount">0</strong></div>
+                <span class="hint" id="gridHint">Connect to see modules</span>
+            </div>
+            <div class="grid-view" id="grid">
+                <div style="grid-column:1/-1; text-align:center; color: var(--muted); padding: 40px;">Connect or load
+                    mock data to view modules.</div>
             </div>
         </div>
     </div>
 
-    <script>
-        // --- State ---
-        let port = null;
-        let reader = null;
-        let writer = null;
-        let inputBuffer = "";
-
-        const state = {
-            mappings: [], // {r, c, pid, type, d1, d2}
-            modules: {},  // key "r,c" -> { r,c,type,name,mfg,fw,paramCount, params: [{id,name,dt,min,max,value}] }
-            ports: {
-                rows: 0,
-                cols: 0,
-                items: {} // key "r,c" -> { configured, hasModule, orientation }
-            },
-            selected: null // {r, c, pid}
-        };
-
-        // --- UI Helpers ---
-        const log = (msg) => {
-            const el = document.getElementById('log');
-            const line = document.createElement('div');
-            line.textContent = `> ${msg}`;
-            el.appendChild(line);
-            el.scrollTop = el.scrollHeight;
-        };
-
-        const updateStatus = (connected) => {
-            const el = document.getElementById('status');
-            el.textContent = connected ? "Connected" : "Disconnected";
-            el.className = "status " + (connected ? "connected" : "");
-            document.getElementById('btnConnect').textContent = connected ? "Disconnect" : "Connect Device";
-        };
-
-        // --- Serial Protocol ---
-        async function connect() {
-            if (port) {
-                await disconnect();
-                return;
-            }
-            try {
-                port = await navigator.serial.requestPort();
-                await port.open({ baudRate: 115200 }); // Baud rate ignored by CDC usually
-
-                const textEncoder = new TextEncoderStream();
-                const writableStreamClosed = textEncoder.readable.pipeTo(port.writable);
-                writer = textEncoder.writable.getWriter();
-
-                const textDecoder = new TextDecoderStream();
-                const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
-                reader = textDecoder.readable.getReader();
-
-                updateStatus(true);
-                readLoop();
-
-                // Init sequence
-                await send("map load");
-                await send("modules list");
-                await send("map list");
-            } catch (e) {
-                console.error(e);
-                log("Connection failed: " + e);
-            }
-        }
-
-        async function disconnect() {
-            if (reader) {
-                await reader.cancel();
-                reader = null;
-            }
-            if (writer) {
-                writer.close();
-                writer = null;
-            }
-            if (port) {
-                await port.close();
-                port = null;
-            }
-            updateStatus(false);
-        }
-
-        async function send(cmd) {
-            if (!writer) return;
-            log("TX: " + cmd);
-            await writer.write(cmd + "\n");
-        }
-
-        async function readLoop() {
-            while (port && port.readable) {
-                try {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    if (value) {
-                        inputBuffer += value;
-                        processBuffer();
-                    }
-                } catch (e) {
-                    console.error(e);
-                    break;
-                }
-            }
-        }
-
-        function processBuffer() {
-            const lines = inputBuffer.split(/\r?\n/);
-            inputBuffer = lines.pop(); // Keep incomplete line
-
-            for (const line of lines) {
-                if (!line.trim()) continue;
-                // log("RX: " + line);
-                handleLine(line.trim());
-            }
-        }
-
-        function handleLine(line) {
-            if (line.startsWith("ok count=")) {
-                // Start of map list
-                state.mappings = [];
-            } else if (line.startsWith("map ")) {
-                // map r c pid type d1 d2
-                const parts = line.split(' ');
-                if (parts.length >= 7) {
-                    state.mappings.push({
-                        r: parseInt(parts[1]),
-                        c: parseInt(parts[2]),
-                        pid: parseInt(parts[3]),
-                        type: parseInt(parts[4]),
-                        d1: parseInt(parts[5]),
-                        d2: parseInt(parts[6])
-                    });
-                }
-                renderGrid();
-            } else if (line.startsWith("ok ports rows=")) {
-                const m = line.match(/^ok ports rows=(\d+)\s+cols=(\d+)/);
-                if (m) {
-                    state.ports.rows = parseInt(m[1], 10);
-                    state.ports.cols = parseInt(m[2], 10);
-                    state.ports.items = {};
-                    state.modules = {};
-                    renderGrid();
-                }
-            } else if (line.startsWith("port ")) {
-                const m = line.match(/^port\s+r=(\d+)\s+c=(\d+)\s+configured=(\d+)\s+hasModule=(\d+)\s+orientation=(\d+)/);
-                if (m) {
-                    const r = parseInt(m[1], 10);
-                    const c = parseInt(m[2], 10);
-                    const key = `${r},${c}`;
-                    state.ports.items[key] = {
-                        r,
-                        c,
-                        configured: parseInt(m[3], 10) !== 0,
-                        hasModule: parseInt(m[4], 10) !== 0,
-                        orientation: parseInt(m[5], 10)
-                    };
-                    renderGrid();
-                }
-            } else if (line.startsWith("module ")) {
-                // module r=<r> c=<c> type=<t> caps=<n> name="..." mfg="..." fw="..." params=<n>
-                const m = line.match(/^module\s+r=(\d+)\s+c=(\d+)\s+type=(\d+)\s+caps=(\d+)\s+name="([^"]*)"\s+mfg="([^"]*)"\s+fw="([^"]*)"\s+params=(\d+)/);
-                if (m) {
-                    const r = parseInt(m[1], 10);
-                    const c = parseInt(m[2], 10);
-                    const key = `${r},${c}`;
-                    state.modules[key] = {
-                        r,
-                        c,
-                        type: parseInt(m[3], 10),
-                        caps: parseInt(m[4], 10),
-                        name: m[5],
-                        mfg: m[6],
-                        fw: m[7],
-                        paramCount: parseInt(m[8], 10),
-                        params: []
-                    };
-                    renderGrid();
-                }
-            } else if (line.startsWith("param ")) {
-                // param r=<r> c=<c> pid=<id> dt=<dt> name="..." min=<..> max=<..> value=<..>
-                const m = line.match(/^param\s+r=(\d+)\s+c=(\d+)\s+pid=(\d+)\s+dt=(\d+)\s+name="([^"]*)"(.*)$/);
-                if (m) {
-                    const r = parseInt(m[1], 10);
-                    const c = parseInt(m[2], 10);
-                    const pid = parseInt(m[3], 10);
-                    const dt = parseInt(m[4], 10);
-                    const name = m[5];
-                    const rest = m[6] || "";
-
-                    const key = `${r},${c}`;
-                    if (!state.modules[key]) {
-                        state.modules[key] = { r, c, type: 0, name: "(unknown)", mfg: "", fw: "", paramCount: 0, params: [] };
-                    }
-
-                    // Extract min/max/value if present
-                    const getNum = (label) => {
-                        const mm = rest.match(new RegExp(`\\s${label}=([^\\s]+)`));
-                        return mm ? mm[1] : null;
-                    };
-
-                    const p = {
-                        id: pid,
-                        dt,
-                        name,
-                        min: getNum("min"),
-                        max: getNum("max"),
-                        value: getNum("value")
-                    };
-
-                    const mod = state.modules[key];
-                    const idx = mod.params.findIndex(x => x.id === pid);
-                    if (idx >= 0) mod.params[idx] = p;
-                    else mod.params.push(p);
-
-                    renderGrid();
-                }
-            } else if (line.startsWith("ok")) {
-                // Generic ack
-            }
-        }
-
-        // --- Rendering ---
-        function renderGrid() {
-            const grid = document.getElementById('grid');
-            grid.innerHTML = '';
-
-            const rows = state.ports.rows;
-            const cols = state.ports.cols;
-            if (!rows || !cols) {
-                grid.innerHTML = `
-                    <div style="grid-column: 1/-1; text-align: center; color: #666; padding: 40px;">
-                        Connect to device to see ports...
-                    </div>
-                `;
-                return;
-            }
-            grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-
-            for (let r = 0; r < rows; r++) {
-                for (let c = 0; c < cols; c++) {
-                    const key = `${r},${c}`;
-                    const portInfo = state.ports.items[key] || { configured: false, hasModule: false, orientation: 0 };
-                    const mod = state.modules[key];
-                    const card = document.createElement('div');
-                    card.className = (portInfo.hasModule && mod) ? 'module-card' : 'module-card empty';
-
-                    // Header
-                    if (!portInfo.configured) {
-                        card.innerHTML = `<div style="text-align:center; color:#666">No Port<br><span class="loc">(${r},${c})</span></div>`;
-                        grid.appendChild(card);
-                        continue;
-                    }
-
-                    if (!portInfo.hasModule || !mod) {
-                        card.innerHTML = `<div style="text-align:center; color:#666">Empty<br><span class="loc">(${r},${c})</span></div>`;
-                        grid.appendChild(card);
-                        continue;
-                    }
-
-                    const caps = (mod.caps || 0);
-                    const capStr = (caps & 1) ? ' • AU' : '';
-
-                    card.innerHTML = `
-                        <div style="display:flex; justify-content:space-between">
-                            <h3>${mod.name || 'Module'}</h3>
-                            <span class="loc">(${r},${c})</span>
-                        </div>
-                        <div style="font-size:11px; color:#888">${mod.mfg || ''} ${mod.fw ? ('• ' + mod.fw) : ''}${capStr}</div>
-                        <div class="param-list" id="params-${r}-${c}"></div>
-                    `;
-
-                    const paramsContainer = card.querySelector('.param-list');
-                    const slotMappings = state.mappings.filter(m => m.r === r && m.c === c);
-
-                    // Use real params from module descriptor.
-                    const params = (mod.params || []).slice().sort((a, b) => a.id - b.id);
-                    for (const p of params) {
-                        const mapping = slotMappings.find(x => x.pid === p.id);
-                        const div = document.createElement('div');
-                        div.className = 'param-item';
-                        if (state.selected && state.selected.r === r && state.selected.c === c && state.selected.pid === p.id) {
-                            div.classList.add('selected');
-                        }
-
-                        let info = "Unmapped";
-                        if (mapping) {
-                            if (mapping.type === 1) info = `Note ${mapping.d2} (Ch${mapping.d1})`;
-                            else if (mapping.type === 2) info = `CC ${mapping.d2} (Ch${mapping.d1})`;
-                            else if (mapping.type === 3) info = `Key ${mapping.d1}`;
-                        }
-                        const valStr = (p.value != null) ? ` = ${p.value}` : '';
-                        div.innerHTML = `<span>${p.name || ('Param ' + p.id)}${valStr}</span><span class="val">${info}</span>`;
-                        div.onclick = () => selectParam(r, c, p.id, mapping, p);
-                        paramsContainer.appendChild(div);
-                    }
-
-                    grid.appendChild(card);
-                }
-            }
-        }
-
-        function selectParam(r, c, pid, mapping, paramInfo) {
-            state.selected = { r, c, pid };
-            renderGrid(); // update selection highlight
-
-            const editor = document.getElementById('editor');
-            editor.classList.add('visible');
-
-            const name = paramInfo && paramInfo.name ? paramInfo.name : `Param ${pid}`;
-            document.getElementById('editTargetName').value = `(${r},${c}) ${name}`;
-
-            if (mapping) {
-                document.getElementById('editType').value = mapping.type;
-                if (mapping.type === 1 || mapping.type === 2) {
-                    document.getElementById('editCh').value = mapping.d1;
-                    document.getElementById('editNum').value = mapping.d2;
-                } else if (mapping.type === 3) {
-                    document.getElementById('editKey').value = mapping.d1;
-                    document.getElementById('editMod').value = mapping.d2;
-                }
-            } else {
-                document.getElementById('editType').value = 0;
-            }
-            updateEditorFields();
-        }
-
-        function updateEditorFields() {
-            const type = parseInt(document.getElementById('editType').value);
-            document.getElementById('groupMidi').style.display = (type === 1 || type === 2) ? 'block' : 'none';
-            document.getElementById('groupKey').style.display = (type === 3) ? 'block' : 'none';
-        }
-
-        // --- Event Listeners ---
-        document.getElementById('btnConnect').onclick = connect;
-        document.getElementById('btnRefresh').onclick = async () => {
-            await send("modules list");
-            await send("map list");
-        };
-        document.getElementById('btnSave').onclick = () => send("map save");
-
-        document.getElementById('editType').onchange = updateEditorFields;
-
-        document.getElementById('btnApply').onclick = async () => {
-            if (!state.selected) return;
-            const { r, c, pid } = state.selected;
-            const type = parseInt(document.getElementById('editType').value);
-            let d1 = 0, d2 = 0;
-
-            if (type === 1 || type === 2) {
-                d1 = parseInt(document.getElementById('editCh').value);
-                d2 = parseInt(document.getElementById('editNum').value);
-            } else if (type === 3) {
-                d1 = parseInt(document.getElementById('editKey').value);
-                d2 = parseInt(document.getElementById('editMod').value);
-            }
-
-            await send(`map set ${r} ${c} ${pid} ${type} ${d1} ${d2}`);
-            await send("map list"); // refresh
-        };
-
-        document.getElementById('btnDelete').onclick = async () => {
-            if (!state.selected) return;
-            const { r, c, pid } = state.selected;
-            await send(`map del ${r} ${c} ${pid}`);
-            await send("map list");
-            document.getElementById('editor').classList.remove('visible');
-            state.selected = null;
-            renderGrid();
-        };
-
-    </script>
+    <script src="app.js"></script>
 </body>
 
 </html>

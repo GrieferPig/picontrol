@@ -7,6 +7,7 @@ bool core1_separate_stack = true;
 
 void setup()
 {
+  Serial.begin(115200);
   usb::init();
   delay(50);
   UsbSerial.println(F("piControl: core0 USB ready"));
@@ -14,6 +15,7 @@ void setup()
 
 void loop()
 {
+  // Serial.println(F("core0 loop"));
   usb::task();
   delay(1);
 }
