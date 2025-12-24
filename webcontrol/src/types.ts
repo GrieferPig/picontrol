@@ -10,6 +10,7 @@ export interface ModuleParam {
     id: number;
     dt: number;
     name: string;
+    access: number; // 1=Read, 2=Write, 3=RW
     min?: string | number;
     max?: string | number;
     value?: string | number;
@@ -32,6 +33,17 @@ export interface Module {
     portLocC: number;
 }
 
+export interface Point {
+    x: number;
+    y: number;
+}
+
+export interface Curve {
+    count: number;
+    points: Point[];
+    controls: Point[];
+}
+
 export interface Mapping {
     r: number;
     c: number;
@@ -39,6 +51,7 @@ export interface Mapping {
     type: number;
     d1: number;
     d2: number;
+    curve?: Curve;
 }
 
 export interface ModuleUiOverride {

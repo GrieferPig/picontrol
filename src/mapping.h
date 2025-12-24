@@ -20,6 +20,7 @@ public:
 
     // CRUD
     static void updateMapping(int r, int c, uint8_t pid, ActionType type, uint8_t d1, uint8_t d2);
+    static void updateMappingCurve(int r, int c, uint8_t pid, const Curve &curve);
     static bool deleteMapping(int r, int c, uint8_t pid);
     static void clearAll();
     static const ModuleMapping *findMapping(int r, int c, uint8_t pid);

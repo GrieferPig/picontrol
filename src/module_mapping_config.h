@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include "common.hpp"
+#include "curve.h"
 
 enum ActionType : uint8_t
 {
@@ -8,25 +9,6 @@ enum ActionType : uint8_t
     ACTION_MIDI_NOTE,
     ACTION_MIDI_CC,
     ACTION_KEYBOARD
-};
-
-enum ActionTriggerBoolean : uint8_t
-{
-    TRIGGER_ON_TRUE = 0,
-    TRIGGER_ON_FALSE,
-    TRIGGER_ON_CHANGE
-};
-
-enum ActionTriggerAnalog : uint8_t
-{
-    TRIGGER_NORMAL = 0,
-    TRIGGER_INVERTED
-};
-
-union ActionTrigger
-{
-    ActionTriggerBoolean boolean;
-    ActionTriggerAnalog analog;
 };
 
 struct ActionTargetMidiNote
@@ -65,6 +47,9 @@ struct ModuleMapping
 
     // Value
     ActionType type = ACTION_NONE;
-    ActionTrigger trigger;
+
+    // Curve mapping (replaces ActionTrigger)
+    Curve curve;
+
     ActionTarget target;
 };

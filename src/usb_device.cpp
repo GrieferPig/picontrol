@@ -308,6 +308,78 @@ namespace usb
                 printlnOk();
                 return;
             }
+            if (argc >= 2 && strcmp(argv[1], "set_curve") == 0)
+            {
+                // map set_curve r c pid <hex>
+                if (argc < 6)
+                {
+                    printlnErr("usage: map set_curve r c pid hexdata");
+                    return;
+                }
+                long r, c;
+                uint8_t pid;
+                if (!parseInt(argv[2], r) || !parseInt(argv[3], c) || !parseU8(argv[4], pid))
+                {
+                    printlnErr("bad args");
+                    return;
+                }
+
+                // Parse hex string
+                const char *hex = argv[5];
+                size_t len = strlen(hex);
+                if (len % 2 != 0 || len > 32) // Max 16 bytes
+                {
+                    printlnErr("bad hex");
+                    return;
+                }
+
+                uint8_t buf[16];
+                size_t bytes = len / 2;
+                for (size_t i = 0; i < bytes; i++)
+                {
+                    char tmp[3] = {hex[i * 2], hex[i * 2 + 1], 0};
+                    buf[i] = (uint8_t)strtol(tmp, nullptr, 16);
+                }
+
+                // Decode curve
+                // Format: count(1), points(count*2), controls(count-1*2)
+                if (bytes < 1)
+                {
+                    printlnErr("empty");
+                    return;
+                }
+
+                Curve curve;
+                curve.count = buf[0];
+                if (curve.count < 2 || curve.count > 4)
+                {
+                    printlnErr("bad count");
+                    return;
+                }
+
+                size_t expected = 1 + curve.count * 2 + (curve.count - 1) * 2;
+                if (bytes < expected)
+                {
+                    printlnErr("short data");
+                    return;
+                }
+
+                size_t ptr = 1;
+                for (int i = 0; i < curve.count; i++)
+                {
+                    curve.points[i].x = buf[ptr++];
+                    curve.points[i].y = buf[ptr++];
+                }
+                for (int i = 0; i < curve.count - 1; i++)
+                {
+                    curve.controls[i].x = buf[ptr++];
+                    curve.controls[i].y = buf[ptr++];
+                }
+
+                MappingManager::updateMappingCurve((int)r, (int)c, pid, curve);
+                printlnOk();
+                return;
+            }
             if (argc >= 2 && strcmp(argv[1], "del") == 0)
             {
                 if (argc < 5)
@@ -367,7 +439,37 @@ namespace usb
                     UsbSerial.print(' ');
                     UsbSerial.print(d1);
                     UsbSerial.print(' ');
-                    UsbSerial.println(d2);
+                    UsbSerial.print(d2);
+
+                    // Append curve data as hex
+                    UsbSerial.print(" curve=");
+                    if (m->curve.count >= 2)
+                    {
+                        UsbSerial.print(m->curve.count, HEX);
+                        for (int k = 0; k < m->curve.count; k++)
+                        {
+                            if (m->curve.points[k].x < 0x10)
+                                UsbSerial.print('0');
+                            UsbSerial.print(m->curve.points[k].x, HEX);
+                            if (m->curve.points[k].y < 0x10)
+                                UsbSerial.print('0');
+                            UsbSerial.print(m->curve.points[k].y, HEX);
+                        }
+                        for (int k = 0; k < m->curve.count - 1; k++)
+                        {
+                            if (m->curve.controls[k].x < 0x10)
+                                UsbSerial.print('0');
+                            UsbSerial.print(m->curve.controls[k].x, HEX);
+                            if (m->curve.controls[k].y < 0x10)
+                                UsbSerial.print('0');
+                            UsbSerial.print(m->curve.controls[k].y, HEX);
+                        }
+                    }
+                    else
+                    {
+                        UsbSerial.print("00"); // Invalid/Empty
+                    }
+                    UsbSerial.println();
                 }
                 return;
             }

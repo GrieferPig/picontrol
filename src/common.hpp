@@ -51,6 +51,13 @@ enum ModuleCapabilities : uint8_t
     MODULE_CAP_ROTATION_AWARE = 1u << 1, // When rotated 180°, flip output values using min/max (except bool)
 };
 
+enum ModuleParameterAccess : uint8_t
+{
+    ACCESS_READ = 1 << 0,
+    ACCESS_WRITE = 1 << 1,
+    ACCESS_READ_WRITE = ACCESS_READ | ACCESS_WRITE
+};
+
 // On-wire payloads must be tightly packed
 #pragma pack(push, 1)
 union ModuleParameterValue
@@ -79,6 +86,7 @@ typedef struct
     uint8_t id;
     char name[32];
     ModuleParameterDataType dataType;
+    uint8_t access;
     ModuleParameterValue value;
     ModuleParameterMinMax minMax;
 } ModuleParameter;

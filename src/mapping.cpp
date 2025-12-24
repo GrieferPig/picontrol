@@ -9,7 +9,7 @@
 namespace
 {
     static constexpr const char *MAPPING_FILE = "/mappings.bin";
-    static constexpr uint32_t MAGIC_MAP1 = 0x3150414Du; // 'MAP1' little-endian
+    static constexpr uint32_t MAGIC_MAP2 = 0x3250414Du; // 'MAP2' little-endian
 
     static critical_section_t g_mapLock;
     static bool g_lockInited = false;
@@ -34,7 +34,7 @@ namespace
     }
 
 #pragma pack(push, 1)
-    struct PersistHeaderV1
+    struct PersistHeaderV2
     {
         uint32_t magic;
         uint16_t version;
@@ -42,7 +42,7 @@ namespace
         uint32_t checksum;
     };
 
-    struct PersistMappingV1
+    struct PersistMappingV2
     {
         int8_t row;
         int8_t col;
@@ -50,6 +50,7 @@ namespace
         uint8_t type;
         uint8_t d1;
         uint8_t d2;
+        Curve curve;
     };
 #pragma pack(pop)
 
@@ -63,11 +64,27 @@ namespace
         return sum;
     }
 
+    static void fillDefaultCurve(Curve &c)
+    {
+        c.count = 2;
+        c.points[0] = {0, 0};
+        c.points[1] = {255, 255};
+        c.controls[0] = {127, 127};
+        // Clear others
+        c.points[2] = {0, 0};
+        c.points[3] = {0, 0};
+        c.controls[1] = {0, 0};
+        c.controls[2] = {0, 0};
+    }
+
     static void fillTarget(ModuleMapping &m, ActionType type, uint8_t d1, uint8_t d2)
     {
         m.type = type;
-        // Defaults
-        m.trigger.boolean = TRIGGER_ON_CHANGE;
+        // Initialize curve to default linear if empty (count=0)
+        if (m.curve.count == 0)
+        {
+            fillDefaultCurve(m.curve);
+        }
 
         switch (type)
         {
@@ -187,6 +204,25 @@ void MappingManager::updateMapping(int r, int c, uint8_t pid, ActionType type, u
     critical_section_exit(&g_mapLock);
 }
 
+void MappingManager::updateMappingCurve(int r, int c, uint8_t pid, const Curve &curve)
+{
+    initLockOnce();
+    critical_section_enter_blocking(&g_mapLock);
+
+    for (int i = 0; i < mappingCount; i++)
+    {
+        if (mappings[i].row == r && mappings[i].col == c && mappings[i].paramId == pid)
+        {
+            mappings[i].curve = curve;
+            critical_section_exit(&g_mapLock);
+            return;
+        }
+    }
+    // If not found, we don't create it just for curve.
+    // User must create mapping first.
+    critical_section_exit(&g_mapLock);
+}
+
 bool MappingManager::deleteMapping(int r, int c, uint8_t pid)
 {
     initLockOnce();
@@ -217,7 +253,7 @@ bool MappingManager::save()
     initFsOnce();
 
     // Snapshot under lock.
-    PersistMappingV1 snapshot[32];
+    PersistMappingV2 snapshot[32];
     uint16_t countLocal = 0;
 
     critical_section_enter_blocking(&g_mapLock);
@@ -232,6 +268,7 @@ bool MappingManager::save()
         snapshot[i].col = (int8_t)m.col;
         snapshot[i].pid = m.paramId;
         snapshot[i].type = (uint8_t)m.type;
+        snapshot[i].curve = m.curve;
 
         // Extract d1/d2 based on type.
         uint8_t d1 = 0, d2 = 0;
@@ -257,11 +294,11 @@ bool MappingManager::save()
     }
     critical_section_exit(&g_mapLock);
 
-    PersistHeaderV1 hdr{};
-    hdr.magic = MAGIC_MAP1;
-    hdr.version = 1;
+    PersistHeaderV2 hdr{};
+    hdr.magic = MAGIC_MAP2;
+    hdr.version = 2;
     hdr.count = countLocal;
-    hdr.checksum = checksum32(reinterpret_cast<const uint8_t *>(snapshot), sizeof(PersistMappingV1) * countLocal);
+    hdr.checksum = checksum32(reinterpret_cast<const uint8_t *>(snapshot), sizeof(PersistMappingV2) * countLocal);
 
     const char *tmp = "/mappings.tmp";
     File f = LittleFS.open(tmp, "w");
@@ -275,7 +312,7 @@ bool MappingManager::save()
         return false;
     }
 
-    size_t bodyLen = sizeof(PersistMappingV1) * countLocal;
+    size_t bodyLen = sizeof(PersistMappingV2) * countLocal;
     if (bodyLen && f.write(reinterpret_cast<const uint8_t *>(snapshot), bodyLen) != bodyLen)
     {
         f.close();
@@ -303,21 +340,21 @@ bool MappingManager::load()
     if (!f)
         return false;
 
-    PersistHeaderV1 hdr{};
+    PersistHeaderV2 hdr{};
     if (f.read(reinterpret_cast<uint8_t *>(&hdr), sizeof(hdr)) != sizeof(hdr))
     {
         f.close();
         return false;
     }
 
-    if (hdr.magic != MAGIC_MAP1 || hdr.version != 1 || hdr.count > 32)
+    if (hdr.magic != MAGIC_MAP2 || hdr.version != 2 || hdr.count > 32)
     {
         f.close();
         return false;
     }
 
-    PersistMappingV1 buf[32];
-    const size_t bodyLen = sizeof(PersistMappingV1) * hdr.count;
+    PersistMappingV2 buf[32];
+    const size_t bodyLen = sizeof(PersistMappingV2) * hdr.count;
     if (bodyLen && f.read(reinterpret_cast<uint8_t *>(buf), bodyLen) != bodyLen)
     {
         f.close();
@@ -341,6 +378,7 @@ bool MappingManager::load()
         m.row = buf[i].row;
         m.col = buf[i].col;
         m.paramId = buf[i].pid;
+        m.curve = buf[i].curve;
         fillTarget(m, (ActionType)buf[i].type, buf[i].d1, buf[i].d2);
     }
     critical_section_exit(&g_mapLock);

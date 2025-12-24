@@ -132,6 +132,7 @@ export function useProtocol() {
                     mod.params.push({
                         id: pid,
                         dt,
+                        access,
                         name,
                         min,
                         max,
@@ -175,7 +176,7 @@ export function useProtocol() {
         if (line.startsWith('map ')) {
             const parts = line.split(' ');
             if (parts.length >= 7) {
-                const entry = {
+                const entry: any = {
                     r: parseInt(parts[1] || '0', 10),
                     c: parseInt(parts[2] || '0', 10),
                     pid: parseInt(parts[3] || '0', 10),
@@ -183,6 +184,56 @@ export function useProtocol() {
                     d1: parseInt(parts[5] || '0', 10),
                     d2: parseInt(parts[6] || '0', 10),
                 };
+
+                // Parse curve=HEX
+                const curvePart = parts.find(p => p.startsWith('curve='));
+                if (curvePart) {
+                    const hex = curvePart.substring(6);
+                    if (hex && hex !== '00') {
+                        // Parse hex string
+                        // Format: count(1 char if <16), points(count*4 chars), controls((count-1)*4 chars)
+                        // Wait, firmware prints count as HEX without leading zero if < 16.
+                        // But points/controls are printed with leading zero (2 chars per byte).
+
+                        // Actually, let's look at the hex string structure.
+                        // If count is 2 (char '2'), then 4 bytes points (8 chars), 2 bytes controls (4 chars).
+                        // Total 1 + 8 + 4 = 13 chars.
+                        // If count is 10 (char 'A'), then ...
+
+                        // Let's parse it carefully.
+                        const countChar = hex.substring(0, 1); // First char is count?
+                        // Wait, if count >= 16, it would be 2 chars?
+                        // Firmware: UsbSerial.print(m->curve.count, HEX);
+                        // If count is 16 (0x10), it prints "10".
+                        // If count is 15 (0xF), it prints "F".
+                        // So length of count part is variable?
+                        // But max count is 4 (from firmware check: if (curve.count < 2 || curve.count > 4)).
+                        // So count is always single digit hex (2, 3, 4).
+
+                        const count = parseInt(hex.substring(0, 1), 16);
+                        const dataHex = hex.substring(1);
+
+                        const points = [];
+                        const controls = [];
+
+                        let ptr = 0;
+                        for (let i = 0; i < count; i++) {
+                            const x = parseInt(dataHex.substr(ptr, 2), 16);
+                            const y = parseInt(dataHex.substr(ptr + 2, 2), 16);
+                            points.push({ x, y });
+                            ptr += 4;
+                        }
+                        for (let i = 0; i < count - 1; i++) {
+                            const x = parseInt(dataHex.substr(ptr, 2), 16);
+                            const y = parseInt(dataHex.substr(ptr + 2, 2), 16);
+                            controls.push({ x, y });
+                            ptr += 4;
+                        }
+
+                        entry.curve = { count, points, controls };
+                    }
+                }
+
                 state.mappings.push(entry);
             }
             return;
@@ -281,14 +332,15 @@ export function useProtocol() {
         }
 
         if (line.startsWith('param ')) {
-            const m = line.match(/^param\s+r=(\d+)\s+c=(\d+)\s+pid=(\d+)\s+dt=(\d+)\s+name="([^"]*)"(.*)$/);
+            const m = line.match(/^param\s+r=(\d+)\s+c=(\d+)\s+pid=(\d+)\s+dt=(\d+)\s+access=(\d+)\s+name="([^"]*)"(.*)$/);
             if (m) {
                 const r = parseInt(m[1] || '0', 10);
                 const c = parseInt(m[2] || '0', 10);
                 const pid = parseInt(m[3] || '0', 10);
                 const dt = parseInt(m[4] || '0', 10);
-                const name = m[5] || '';
-                const rest = m[6] || '';
+                const access = parseInt(m[5] || '0', 10);
+                const name = m[6] || '';
+                const rest = m[7] || '';
 
                 const readField = (label: string) => {
                     const mm = rest.match(new RegExp(`\\s${label}=([^\\s]+)`));

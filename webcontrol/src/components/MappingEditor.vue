@@ -3,6 +3,8 @@ import { computed, ref, watch, nextTick } from 'vue';
 import { useStore } from '../composables/useStore';
 import { useRouter } from '../services/router';
 import { midiNoteLabel, hidKeyLabel, noteNumberToParts, notePartsToNumber, formatKeyComboDisplay, hidKeycodeFromKeyboardEvent, hidModifierMaskFromEvent } from '../utils';
+import CurveEditor from './CurveEditor.vue';
+import type { Curve } from '../types';
 
 const { state } = useStore();
 const { send } = useRouter();
@@ -27,6 +29,7 @@ const editOctave = ref(4);
 const editCc = ref(0);
 const capturedKeycode = ref(0);
 const capturedModmask = ref(0);
+const editCurve = ref<Curve | undefined>(undefined);
 
 const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -44,6 +47,7 @@ watch(() => state.selected?.pid, () => {
             capturedKeycode.value = mapping.value.d1;
             capturedModmask.value = mapping.value.d2;
         }
+        editCurve.value = mapping.value.curve;
     } else {
         editType.value = 0;
         editCh.value = 1;
@@ -52,6 +56,7 @@ watch(() => state.selected?.pid, () => {
         editCc.value = 0;
         capturedKeycode.value = 0;
         capturedModmask.value = 0;
+        editCurve.value = undefined;
     }
 }, { immediate: true });
 
@@ -121,6 +126,57 @@ function handleKeyCombo(e: KeyboardEvent) {
     capturedModmask.value = modmask;
 }
 
+const xSteps = computed(() => {
+    if (!selectedParam.value) return 0;
+    const p = selectedParam.value;
+    if (p.dt === 2) return 2; // Bool
+    if (p.dt === 0) { // Int
+        const min = Number(p.min);
+        const max = Number(p.max);
+        if (!isNaN(min) && !isNaN(max)) {
+            const range = max - min;
+            if (range > 0 && range < 256) return range + 1;
+        }
+    }
+    return 0; // No snapping for float or large int ranges
+});
+
+const ySteps = computed(() => {
+    const t = Number(editType.value);
+    if (t === 1 || t === 2) return 128; // MIDI 0-127
+    if (t === 3) return 2; // Keyboard 0/1
+    return 256; // Full range
+});
+
+const xLabel = computed(() => {
+    return 'Input';
+});
+
+const xDisplayMax = computed(() => {
+    if (!selectedParam.value) return 255;
+    const p = selectedParam.value;
+    if (p.dt === 2) return 1; // Bool
+    if (p.dt === 0 || p.dt === 1) {
+        // If max is numeric, return it.
+        // Note: p.max is string|number.
+        if (p.max !== undefined && p.max !== '') return p.max;
+    }
+    return 255;
+});
+
+const yDisplayMax = computed(() => {
+    const t = Number(editType.value);
+    if (t === 1 || t === 2) return 127;
+    if (t === 3) return 1;
+    return 255;
+});
+
+const maxPoints = computed(() => {
+    const steps = xSteps.value;
+    if (steps > 0 && steps < 5) return steps;
+    return 5;
+});
+
 async function apply() {
     if (!state.selected || state.selected.pid == null) return;
     const t = Number(editType.value);
@@ -138,6 +194,22 @@ async function apply() {
         d2v = capturedModmask.value;
     }
     await send(`map set ${state.selected.r} ${state.selected.c} ${state.selected.pid} ${t} ${d1v} ${d2v}`);
+    
+    if (editCurve.value) {
+        const c = editCurve.value;
+        let hex = '';
+        hex += c.count.toString(16).padStart(2, '0').toUpperCase();
+        for (const p of c.points) {
+            hex += p.x.toString(16).padStart(2, '0').toUpperCase();
+            hex += p.y.toString(16).padStart(2, '0').toUpperCase();
+        }
+        for (const p of c.controls) {
+            hex += p.x.toString(16).padStart(2, '0').toUpperCase();
+            hex += p.y.toString(16).padStart(2, '0').toUpperCase();
+        }
+        await send(`map set_curve ${state.selected.r} ${state.selected.c} ${state.selected.pid} ${hex}`);
+    }
+    
     await send('map list');
 }
 
@@ -205,6 +277,21 @@ async function del() {
                 </div>
             </div>
             <div v-if="editType == 3" class="muted" style="font-size:12px;">{{ keyHint }}</div>
+
+            <div v-if="editType != 0" class="form-group">
+                <label>Response Curve</label>
+                <CurveEditor 
+                    v-model="editCurve" 
+                    :x-label="xLabel"
+                    :y-label="editType == 1 ? 'Velocity' : (editType == 2 ? 'Output' : (editType == 3 ? 'State' : 'Output'))"
+                    :show-threshold="editType == 1 || editType == 3"
+                    :x-steps="xSteps"
+                    :y-steps="ySteps"
+                    :max-points="maxPoints"
+                    :x-display-max="xDisplayMax"
+                    :y-display-max="yDisplayMax"
+                />
+            </div>
 
             <div class="button-row">
                 <button class="primary" @click="apply">Apply</button>

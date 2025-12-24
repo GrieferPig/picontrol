@@ -66,12 +66,14 @@ async function updateParam(p: ModuleParam, newVal: string | number) {
                 <span>{{ p.name || 'Param ' + p.id }}
                     <input v-if="p.dt === 2" type="checkbox" class="param-value-input"
                         :checked="p.value == 1 || p.value === 'true' || p.value === '1'"
+                        :disabled="(p.access & 2) === 0"
                         @click.stop
                         @change="(e) => updateParam(p, (e.target as HTMLInputElement).checked ? '1' : '0')"
                         style="width: auto; margin-left: 6px;"
                     >
                     <input v-else type="number" class="param-value-input"
                         :value="p.value"
+                        :disabled="(p.access & 2) === 0"
                         :min="p.min" :max="p.max" :step="p.dt === 1 ? '0.01' : '1'"
                         @click.stop
                         @change="(e) => updateParam(p, (e.target as HTMLInputElement).value)"

@@ -163,7 +163,7 @@ static ModuleParameterValue flipValue(const Port *port, uint8_t pid, ModuleParam
     return result;
 }
 
-static uint8_t scaleToMidi7(const Port *port, uint8_t pid, ModuleParameterDataType dt, const ModuleParameterValue &v)
+static uint8_t normalizeToU8(const Port *port, uint8_t pid, ModuleParameterDataType dt, const ModuleParameterValue &v)
 {
     if (!port || !port->hasModule || pid >= port->module.parameterCount)
         return 0;
@@ -171,48 +171,38 @@ static uint8_t scaleToMidi7(const Port *port, uint8_t pid, ModuleParameterDataTy
 
     if (dt == ModuleParameterDataType::PARAM_TYPE_BOOL)
     {
-        return v.boolValue ? 127 : 0;
+        return v.boolValue ? 255 : 0;
     }
     if (dt == ModuleParameterDataType::PARAM_TYPE_INT)
     {
         const int32_t mn = p.minMax.intMin;
         const int32_t mx = p.minMax.intMax;
         if (mx <= mn)
-            return static_cast<uint8_t>(v.intValue & 0x7F);
-        int32_t clamped = v.intValue;
-        if (clamped < mn)
-            clamped = mn;
-        if (clamped > mx)
-            clamped = mx;
-        const int32_t num = (clamped - mn) * 127;
-        const int32_t den = (mx - mn);
-        return static_cast<uint8_t>(num / den);
+            return 0;
+
+        int32_t val = v.intValue;
+        if (val < mn)
+            val = mn;
+        if (val > mx)
+            val = mx;
+
+        // (val - min) * 255 / (max - min)
+        return (uint8_t)(((int64_t)(val - mn) * 255) / (mx - mn));
     }
     if (dt == ModuleParameterDataType::PARAM_TYPE_FLOAT)
     {
         const float mn = p.minMax.floatMin;
         const float mx = p.minMax.floatMax;
         if (mx <= mn)
-        {
-            float f = v.floatValue;
-            if (f < 0)
-                f = 0;
-            if (f > 127)
-                f = 127;
-            return static_cast<uint8_t>(f);
-        }
-        float f = v.floatValue;
-        if (f < mn)
-            f = mn;
-        if (f > mx)
-            f = mx;
-        const float norm = (f - mn) / (mx - mn);
-        float out = norm * 127.0f;
-        if (out < 0)
-            out = 0;
-        if (out > 127)
-            out = 127;
-        return static_cast<uint8_t>(out);
+            return 0;
+
+        float val = v.floatValue;
+        if (val < mn)
+            val = mn;
+        if (val > mx)
+            val = mx;
+
+        return (uint8_t)((val - mn) * 255.0f / (mx - mn));
     }
     return 0;
 }
@@ -239,11 +229,20 @@ static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterData
     {
         effectivePrev = *prev;
     }
-    const ModuleParameterValue *effectivePrevPtr = prev ? &effectivePrev : nullptr;
+
+    // Normalize inputs to 0-255
+    uint8_t rawCur = normalizeToU8(port, pid, dt, effectiveCur);
+    uint8_t rawPrev = prev ? normalizeToU8(port, pid, dt, effectivePrev) : 0;
+
+    // Apply Curve
+    uint8_t mapCur = CurveEvaluator::eval(m->curve, rawCur);
+    uint8_t mapPrev = prev ? CurveEvaluator::eval(m->curve, rawPrev) : 0;
 
     const bool hadPrev = (prev != nullptr);
-    const bool curBool = (dt == ModuleParameterDataType::PARAM_TYPE_BOOL) ? (effectiveCur.boolValue != 0) : (effectiveCur.intValue != 0);
-    const bool prevBool = hadPrev ? ((dt == ModuleParameterDataType::PARAM_TYPE_BOOL) ? (effectivePrevPtr->boolValue != 0) : (effectivePrevPtr->intValue != 0)) : false;
+
+    // Boolean logic based on 50% threshold of MAPPED value
+    const bool curBool = (mapCur >= 128);
+    const bool prevBool = hadPrev ? (mapPrev >= 128) : false;
 
     switch (m->type)
     {
@@ -254,7 +253,8 @@ static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterData
         if (ch > 0)
             ch -= 1;
         const uint8_t note = m->target.midiNote.noteNumber;
-        const uint8_t vel = m->target.midiNote.velocity ? m->target.midiNote.velocity : 127;
+        // Use curve output as velocity (0-255 -> 0-127)
+        const uint8_t vel = mapCur >> 1;
 
         if (!hadPrev || curBool != prevBool)
         {
@@ -271,8 +271,14 @@ static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterData
         if (ch > 0)
             ch -= 1;
         const uint8_t cc = m->target.midiCC.ccNumber;
-        const uint8_t value = scaleToMidi7(port, pid, dt, effectiveCur);
-        usb::sendMidiCC(ch, cc, value);
+        // Map 0-255 to 0-127
+        const uint8_t value = mapCur >> 1;
+
+        // Send if changed (or first time)
+        if (!hadPrev || (mapCur >> 1) != (mapPrev >> 1))
+        {
+            usb::sendMidiCC(ch, cc, value);
+        }
         break;
     }
     case ACTION_KEYBOARD:
@@ -490,7 +496,8 @@ void setup1()
     // Load persisted mappings on boot so default mappings are active
     // even without a web panel issuing 'map load'. If no mapping file exists,
     // this will clear to an empty default.
-    if (!MappingManager::load()) {
+    if (!MappingManager::load())
+    {
         // Ensure a mapping file exists for subsequent boots.
         MappingManager::save();
     }
@@ -576,6 +583,8 @@ void loop1()
                         UsbSerial.print(mp.id);
                         UsbSerial.print(" dt=");
                         UsbSerial.print((uint8_t)mp.dataType);
+                        UsbSerial.print(" access=");
+                        UsbSerial.print(mp.access);
                         UsbSerial.print(" name=\"");
                         UsbSerial.print(mp.name);
                         UsbSerial.print("\"");
@@ -703,6 +712,17 @@ void loop1()
             }
 
             sendSetParameter(spreq.row, spreq.col, spreq.paramId, dt, val);
+
+            // Save to persistence if it's a writable parameter
+            if (spreq.paramId < p->module.parameterCount)
+            {
+                const ModuleParameter &mp = p->module.parameters[spreq.paramId];
+                if (mp.access & ModuleParameterAccess::ACCESS_WRITE)
+                {
+                    ModuleConfigManager::saveParamValue(spreq.row, spreq.col, spreq.paramId, dt, val);
+                }
+            }
+
             sendGetParameter(spreq.row, spreq.col, spreq.paramId);
         }
     }
@@ -807,6 +827,20 @@ void loop1()
                 port->module = props.module;
                 bool wasNew = !port->hasModule;
                 port->hasModule = true;
+
+                // Restore persisted values for writable parameters
+                for (uint8_t i = 0; i < port->module.parameterCount; i++)
+                {
+                    const ModuleParameter &mp = port->module.parameters[i];
+                    if (mp.access & ModuleParameterAccess::ACCESS_WRITE)
+                    {
+                        ModuleParameterValue savedVal;
+                        if (ModuleConfigManager::getParamValue(port->row, port->col, i, mp.dataType, savedVal))
+                        {
+                            sendSetParameter(port->row, port->col, i, mp.dataType, savedVal);
+                        }
+                    }
+                }
 
                 if (wasNew)
                 {
