@@ -32,26 +32,26 @@ static uint8_t nextParamIndex[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static bool lastValueValid[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
 static ModuleParameterValue lastValue[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
 
-static const __FlashStringHelper *commandToString(ModuleMessageId id)
+static const char *commandToString(ModuleMessageId id)
 {
     switch (id)
     {
     case ModuleMessageId::CMD_PING:
-        return F("PING");
+        return "PING";
     case ModuleMessageId::CMD_GET_PROPERTIES:
-        return F("GET_PROPERTIES");
+        return "GET_PROPERTIES";
     case ModuleMessageId::CMD_SET_PARAMETER:
-        return F("SET_PARAMETER");
+        return "SET_PARAMETER";
     case ModuleMessageId::CMD_GET_PARAMETER:
-        return F("GET_PARAMETER");
+        return "GET_PARAMETER";
     case ModuleMessageId::CMD_RESET_MODULE:
-        return F("RESET_MODULE");
+        return "RESET_MODULE";
     case ModuleMessageId::CMD_SET_AUTOUPDATE:
-        return F("SET_AUTOUPDATE");
+        return "SET_AUTOUPDATE";
     case ModuleMessageId::CMD_RESPONSE:
-        return F("RESPONSE");
+        return "RESPONSE";
     default:
-        return F("UNKNOWN");
+        return "UNKNOWN";
     }
 }
 
@@ -277,10 +277,18 @@ static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterData
     }
     case ACTION_KEYBOARD:
     {
-        // Only fire on rising edge for booleans.
-        if (!hadPrev || (curBool && !prevBool))
+        // Fire KeyDown on rising edge, KeyUp on falling edge.
+        // This supports holding keys.
+        if (!hadPrev || curBool != prevBool)
         {
-            usb::sendKeypress(m->target.keyboard.keycode, m->target.keyboard.modifier);
+            if (curBool)
+            {
+                usb::sendKeyDown(m->target.keyboard.keycode, m->target.keyboard.modifier);
+            }
+            else
+            {
+                usb::sendKeyUp();
+            }
         }
         break;
     }
@@ -293,7 +301,7 @@ static void printHexBytes(const uint8_t *data, uint16_t len, uint16_t maxBytes =
 {
     if (!data || len == 0)
     {
-        UsbSerial.print(F("<empty>"));
+        UsbSerial.print("<empty>");
         return;
     }
     uint16_t toPrint = len;
@@ -308,20 +316,20 @@ static void printHexBytes(const uint8_t *data, uint16_t len, uint16_t maxBytes =
             UsbSerial.print(' ');
     }
     if (len > toPrint)
-        UsbSerial.print(F(" ..."));
+        UsbSerial.print(" ...");
 }
 
 static void printMessageHuman(const ModuleMessage &msg, Port *port)
 {
-    UsbSerial.print(F("[MSG] Port "));
+    UsbSerial.print("[MSG] Port ");
     UsbSerial.print(msg.moduleRow);
     UsbSerial.print(',');
     UsbSerial.print(msg.moduleCol);
-    UsbSerial.print(F(" type="));
+    UsbSerial.print(" type=");
     UsbSerial.print(commandToString(msg.commandId));
-    UsbSerial.print(F(" (0x"));
+    UsbSerial.print(" (0x");
     UsbSerial.print(static_cast<uint8_t>(msg.commandId), HEX);
-    UsbSerial.print(F(") len="));
+    UsbSerial.print(") len=");
     UsbSerial.print(msg.payloadLength);
 
     switch (msg.commandId)
@@ -331,14 +339,14 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
         {
             ModuleMessagePingPayload p{};
             memcpy(&p, msg.payload, sizeof(p));
-            UsbSerial.print(F(" magic=0x"));
+            UsbSerial.print(" magic=0x");
             UsbSerial.print(p.magic, HEX);
         }
         break;
     case ModuleMessageId::CMD_GET_PROPERTIES:
         if (msg.payloadLength >= 1)
         {
-            UsbSerial.print(F(" requestId="));
+            UsbSerial.print(" requestId=");
             UsbSerial.print(msg.payload[0]);
         }
         break;
@@ -347,11 +355,11 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
         {
             ModuleMessageSetParameterPayload p{};
             memcpy(&p, msg.payload, sizeof(p));
-            UsbSerial.print(F(" paramId="));
+            UsbSerial.print(" paramId=");
             UsbSerial.print(p.parameterId);
-            UsbSerial.print(F(" type="));
+            UsbSerial.print(" type=");
             UsbSerial.print(static_cast<uint8_t>(p.dataType));
-            UsbSerial.print(F(" value="));
+            UsbSerial.print(" value=");
             switch (p.dataType)
             {
             case ModuleParameterDataType::PARAM_TYPE_INT:
@@ -364,7 +372,7 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
                 UsbSerial.print(static_cast<int>(p.value.boolValue));
                 break;
             default:
-                UsbSerial.print(F("?"));
+                UsbSerial.print("?");
                 break;
             }
         }
@@ -374,7 +382,7 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
         {
             ModuleMessageGetParameterPayload p{};
             memcpy(&p, msg.payload, sizeof(p));
-            UsbSerial.print(F(" paramId="));
+            UsbSerial.print(" paramId=");
             UsbSerial.print(p.parameterId);
         }
         break;
@@ -383,7 +391,7 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
         {
             ModuleMessageResetPayload p{};
             memcpy(&p, msg.payload, sizeof(p));
-            UsbSerial.print(F(" magic=0x"));
+            UsbSerial.print(" magic=0x");
             UsbSerial.print(p.magic, HEX);
         }
         break;
@@ -396,11 +404,11 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
                 copyLen = sizeof(resp);
             memcpy(&resp, msg.payload, copyLen);
 
-            UsbSerial.print(F(" status="));
+            UsbSerial.print(" status=");
             UsbSerial.print(static_cast<uint8_t>(resp.status));
-            UsbSerial.print(F(" inRespTo="));
+            UsbSerial.print(" inRespTo=");
             UsbSerial.print(commandToString(resp.inResponseTo));
-            UsbSerial.print(F(" payloadBytes="));
+            UsbSerial.print(" payloadBytes=");
             UsbSerial.print(resp.payloadLength);
 
             if (resp.inResponseTo == ModuleMessageId::CMD_GET_PROPERTIES &&
@@ -427,13 +435,13 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
                         props.module.parameterCount = maxParams;
                 }
 
-                UsbSerial.print(F(" name=\""));
+                UsbSerial.print(" name=\"");
                 UsbSerial.print(props.module.name);
-                UsbSerial.print(F("\" mfg=\""));
+                UsbSerial.print("\" mfg=\"");
                 UsbSerial.print(props.module.manufacturer);
-                UsbSerial.print(F("\" fw=\""));
+                UsbSerial.print("\" fw=\"");
                 UsbSerial.print(props.module.fwVersion);
-                UsbSerial.print(F("\" params="));
+                UsbSerial.print("\" params=");
                 UsbSerial.print(props.module.parameterCount);
             }
             else if (resp.inResponseTo == ModuleMessageId::CMD_GET_PARAMETER &&
@@ -441,21 +449,21 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
                      resp.payloadLength >= 1)
             {
                 uint8_t pid = resp.payload[0];
-                UsbSerial.print(F(" paramId="));
+                UsbSerial.print(" paramId=");
                 UsbSerial.print(pid);
-                UsbSerial.print(F(" valueBytes="));
+                UsbSerial.print(" valueBytes=");
                 if (resp.payloadLength > 1)
                 {
                     printHexBytes(&resp.payload[1], static_cast<uint16_t>(resp.payloadLength - 1));
                 }
                 else
                 {
-                    UsbSerial.print(F("<none>"));
+                    UsbSerial.print("<none>");
                 }
             }
             else
             {
-                UsbSerial.print(F(" data="));
+                UsbSerial.print(" data=");
                 printHexBytes(resp.payload, resp.payloadLength);
             }
         }
@@ -466,9 +474,9 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
 
     if (port && port->hasModule)
     {
-        UsbSerial.print(F(" module=\""));
+        UsbSerial.print(" module=\"");
         UsbSerial.print(port->module.name);
-        UsbSerial.print(F("\""));
+        UsbSerial.print("\"");
     }
     UsbSerial.println();
 }
@@ -479,8 +487,15 @@ void setup1()
     runtime_config::init();
     runtime_query::init();
     MappingManager::init();
+    // Load persisted mappings on boot so default mappings are active
+    // even without a web panel issuing 'map load'. If no mapping file exists,
+    // this will clear to an empty default.
+    if (!MappingManager::load()) {
+        // Ensure a mapping file exists for subsequent boots.
+        MappingManager::save();
+    }
     ModuleConfigManager::init();
-    UsbSerial.println(F("piControl: core1 module scan ready"));
+    UsbSerial.println("piControl: core1 module scan ready");
 }
 
 void loop1()
@@ -496,9 +511,9 @@ void loop1()
         if (q.type == runtime_query::RequestType::LIST_MODULES)
         {
             // Header includes grid size so the UI can render empty ports.
-            UsbSerial.print(F("ok ports rows="));
+            UsbSerial.print("ok ports rows=");
             UsbSerial.print(MODULE_PORT_ROWS);
-            UsbSerial.print(F(" cols="));
+            UsbSerial.print(" cols=");
             UsbSerial.println(MODULE_PORT_COLS);
 
             for (int r = 0; r < MODULE_PORT_ROWS; r++)
@@ -510,82 +525,82 @@ void loop1()
                         continue;
 
                     // Always emit port line.
-                    UsbSerial.print(F("port r="));
+                    UsbSerial.print("port r=");
                     UsbSerial.print(r);
-                    UsbSerial.print(F(" c="));
+                    UsbSerial.print(" c=");
                     UsbSerial.print(c);
-                    UsbSerial.print(F(" configured="));
+                    UsbSerial.print(" configured=");
                     UsbSerial.print(p->configured ? 1 : 0);
-                    UsbSerial.print(F(" hasModule="));
+                    UsbSerial.print(" hasModule=");
                     UsbSerial.print(p->hasModule ? 1 : 0);
-                    UsbSerial.print(F(" orientation="));
+                    UsbSerial.print(" orientation=");
                     UsbSerial.println((uint8_t)getEffectiveOrientation(p));
 
                     if (!p->configured || !p->hasModule)
                         continue;
 
-                    UsbSerial.print(F("module r="));
+                    UsbSerial.print("module r=");
                     UsbSerial.print(r);
-                    UsbSerial.print(F(" c="));
+                    UsbSerial.print(" c=");
                     UsbSerial.print(c);
-                    UsbSerial.print(F(" type="));
+                    UsbSerial.print(" type=");
                     UsbSerial.print((uint8_t)p->module.type);
-                    UsbSerial.print(F(" caps="));
+                    UsbSerial.print(" caps=");
                     UsbSerial.print(p->module.capabilities);
-                    UsbSerial.print(F(" name=\""));
+                    UsbSerial.print(" name=\"");
                     UsbSerial.print(p->module.name);
-                    UsbSerial.print(F("\" mfg=\""));
+                    UsbSerial.print("\" mfg=\"");
                     UsbSerial.print(p->module.manufacturer);
-                    UsbSerial.print(F("\" fw=\""));
+                    UsbSerial.print("\" fw=\"");
                     UsbSerial.print(p->module.fwVersion);
-                    UsbSerial.print(F("\" params="));
+                    UsbSerial.print("\" params=");
                     UsbSerial.print(p->module.parameterCount);
-                    UsbSerial.print(F(" szr="));
+                    UsbSerial.print(" szr=");
                     UsbSerial.print(p->module.physicalSizeRow);
-                    UsbSerial.print(F(" szc="));
+                    UsbSerial.print(" szc=");
                     UsbSerial.print(p->module.physicalSizeCol);
-                    UsbSerial.print(F(" plr="));
+                    UsbSerial.print(" plr=");
                     UsbSerial.print(p->module.portLocationRow);
-                    UsbSerial.print(F(" plc="));
+                    UsbSerial.print(" plc=");
                     UsbSerial.println(p->module.portLocationCol);
 
                     const uint8_t pc = p->module.parameterCount;
                     for (uint8_t pid = 0; pid < pc && pid < 32; pid++)
                     {
                         const ModuleParameter &mp = p->module.parameters[pid];
-                        UsbSerial.print(F("param r="));
+                        UsbSerial.print("param r=");
                         UsbSerial.print(r);
-                        UsbSerial.print(F(" c="));
+                        UsbSerial.print(" c=");
                         UsbSerial.print(c);
-                        UsbSerial.print(F(" pid="));
+                        UsbSerial.print(" pid=");
                         UsbSerial.print(mp.id);
-                        UsbSerial.print(F(" dt="));
+                        UsbSerial.print(" dt=");
                         UsbSerial.print((uint8_t)mp.dataType);
-                        UsbSerial.print(F(" name=\""));
+                        UsbSerial.print(" name=\"");
                         UsbSerial.print(mp.name);
-                        UsbSerial.print(F("\""));
+                        UsbSerial.print("\"");
 
                         // Min/max/value are type-dependent.
                         switch (mp.dataType)
                         {
                         case ModuleParameterDataType::PARAM_TYPE_BOOL:
-                            UsbSerial.print(F(" min=0 max=1 value="));
+                            UsbSerial.print(" min=0 max=1 value=");
                             UsbSerial.print((int)mp.value.boolValue);
                             break;
                         case ModuleParameterDataType::PARAM_TYPE_INT:
-                            UsbSerial.print(F(" min="));
+                            UsbSerial.print(" min=");
                             UsbSerial.print(mp.minMax.intMin);
-                            UsbSerial.print(F(" max="));
+                            UsbSerial.print(" max=");
                             UsbSerial.print(mp.minMax.intMax);
-                            UsbSerial.print(F(" value="));
+                            UsbSerial.print(" value=");
                             UsbSerial.print(mp.value.intValue);
                             break;
                         case ModuleParameterDataType::PARAM_TYPE_FLOAT:
-                            UsbSerial.print(F(" min="));
+                            UsbSerial.print(" min=");
                             UsbSerial.print(mp.minMax.floatMin, 6);
-                            UsbSerial.print(F(" max="));
+                            UsbSerial.print(" max=");
                             UsbSerial.print(mp.minMax.floatMax, 6);
-                            UsbSerial.print(F(" value="));
+                            UsbSerial.print(" value=");
                             UsbSerial.print(mp.value.floatValue, 6);
                             break;
                         default:
@@ -596,7 +611,7 @@ void loop1()
                 }
             }
 
-            UsbSerial.println(F("ok modules done"));
+            UsbSerial.println("ok modules done");
         }
     }
 
@@ -688,6 +703,7 @@ void loop1()
             }
 
             sendSetParameter(spreq.row, spreq.col, spreq.paramId, dt, val);
+            sendGetParameter(spreq.row, spreq.col, spreq.paramId);
         }
     }
 
@@ -789,7 +805,16 @@ void loop1()
                 }
 
                 port->module = props.module;
+                bool wasNew = !port->hasModule;
                 port->hasModule = true;
+
+                if (wasNew)
+                {
+                    UsbSerial.print("event module_ready r=");
+                    UsbSerial.print(port->row);
+                    UsbSerial.print(" c=");
+                    UsbSerial.println(port->col);
+                }
 
                 // Prefer module-driven updates if the module advertises support.
                 if ((port->module.capabilities & MODULE_CAP_AUTOUPDATE) != 0)
@@ -830,6 +855,26 @@ void loop1()
                             applyMappingToUsb(port, pid, dt, cur, prevPtr);
                             lastValue[port->row][port->col][pid] = cur;
                             lastValueValid[port->row][port->col][pid] = true;
+
+                            UsbSerial.print("event param_changed r=");
+                            UsbSerial.print(port->row);
+                            UsbSerial.print(" c=");
+                            UsbSerial.print(port->col);
+                            UsbSerial.print(" pid=");
+                            UsbSerial.print(pid);
+                            UsbSerial.print(" value=");
+                            switch (dt)
+                            {
+                            case ModuleParameterDataType::PARAM_TYPE_BOOL:
+                                UsbSerial.println(cur.boolValue ? 1 : 0);
+                                break;
+                            case ModuleParameterDataType::PARAM_TYPE_INT:
+                                UsbSerial.println(cur.intValue);
+                                break;
+                            case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+                                UsbSerial.println(cur.floatValue, 6);
+                                break;
+                            }
                         }
                     }
                 }

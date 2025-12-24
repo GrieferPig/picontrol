@@ -40,12 +40,7 @@ export function useSerial() {
             await send('modules list');
             await send('map list');
 
-            // Start auto-refresh every 500ms
-            refreshIntervalId = window.setInterval(async () => {
-                if (port && writer) {
-                    await send('modules list');
-                }
-            }, 500);
+            // Polling removed in favor of event-driven updates
         } catch (err) {
             logAdd(`Connect failed: ${err}`);
             console.error(err);
@@ -107,12 +102,15 @@ export function useSerial() {
         }
     }
 
-    function processBuffer() {
+    async function processBuffer() {
         const lines = inputBuffer.split(/\r?\n/);
         inputBuffer = lines.pop() || '';
         for (const line of lines) {
             if (!line.trim()) continue;
-            handleLine(line.trim());
+            const result = handleLine(line.trim());
+            if (result && result.action === 'refresh_modules') {
+                await send('modules list');
+            }
         }
     }
 

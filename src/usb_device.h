@@ -24,6 +24,8 @@ namespace usb
 
     // HID keyboard helpers (enqueue; core 0 sends)
     bool sendKeypress(uint8_t hidKeycode, uint8_t modifier = 0);
+    bool sendKeyDown(uint8_t hidKeycode, uint8_t modifier = 0);
+    bool sendKeyUp();
 }
 
 // Print-compatible logger routed to USB CDC.

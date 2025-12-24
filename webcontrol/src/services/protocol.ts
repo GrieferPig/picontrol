@@ -6,7 +6,167 @@ export function useProtocol() {
     const { state } = useStore();
     const { add: logAdd } = useLogger();
 
-    function handleLine(line: string) {
+    function handleLine(line: string): { action?: string } | void {
+        if (line.startsWith('event ')) {
+            const evt = line.substring(6);
+
+            if (evt.startsWith('port_connected ')) {
+                const m = evt.match(/^port_connected\s+r=(\d+)\s+c=(\d+)\s+orientation=(\d+)/);
+                if (m) {
+                    const r = parseInt(m[1] || '0', 10);
+                    const c = parseInt(m[2] || '0', 10);
+                    const key = `${r},${c}`;
+                    if (!state.ports.items[key]) {
+                        state.ports.items[key] = { r, c, configured: false, hasModule: false, orientation: 0 };
+                    }
+                    state.ports.items[key].configured = true;
+                    state.ports.items[key].hasModule = true; // Mark as present but unidentified
+                    state.ports.items[key].orientation = parseInt(m[3] || '0', 10);
+
+                    // Clear any old module data so it shows as unidentified
+                    delete state.modules[key];
+                }
+                return;
+            }
+
+            if (evt.startsWith('port_disconnected ')) {
+                const m = evt.match(/^port_disconnected\s+r=(\d+)\s+c=(\d+)/);
+                if (m) {
+                    const r = parseInt(m[1] || '0', 10);
+                    const c = parseInt(m[2] || '0', 10);
+                    const key = `${r},${c}`;
+                    if (state.ports.items[key]) {
+                        state.ports.items[key].configured = false;
+                        state.ports.items[key].hasModule = false;
+                    }
+                    delete state.modules[key];
+                }
+                return;
+            }
+
+            if (evt.startsWith('module_ready ')) {
+                // The module is ready to be queried.
+                // We return a special signal so the caller can trigger a refresh.
+                return { action: 'refresh_modules' };
+            }
+
+            if (evt.startsWith('module_found ')) {
+                const m = evt.match(/^module_found\s+r=(\d+)\s+c=(\d+)\s+type=(\d+)\s+caps=(\d+)\s+name="([^"]*)"\s+mfg="([^"]*)"\s+fw="([^"]*)"\s+params=(\d+)(.*)$/);
+                if (m) {
+                    const r = parseInt(m[1] || '0', 10);
+                    const c = parseInt(m[2] || '0', 10);
+                    const key = `${r},${c}`;
+
+                    const rest = m[9] || '';
+                    const readField = (label: string) => {
+                        const mm = rest.match(new RegExp(`\\s${label}=([^\\s]+)`));
+                        return mm ? mm[1] : null;
+                    };
+                    const szr = readField('szr');
+                    const szc = readField('szc');
+                    const plr = readField('plr');
+                    const plc = readField('plc');
+
+                    const type = parseInt(m[3] || '0', 10);
+                    const caps = parseInt(m[4] || '0', 10);
+                    const name = m[5] || '';
+                    const mfg = m[6] || '';
+                    const fw = m[7] || '';
+                    const paramCount = parseInt(m[8] || '0', 10);
+                    const sizeR = szr != null ? parseInt(szr, 10) : 1;
+                    const sizeC = szc != null ? parseInt(szc, 10) : 1;
+                    const portLocR = plr != null ? parseInt(plr, 10) : 0;
+                    const portLocC = plc != null ? parseInt(plc, 10) : 0;
+
+                    if (state.ports.items[key]) {
+                        state.ports.items[key].hasModule = true;
+                    }
+
+                    // Always overwrite on module_found
+                    state.modules[key] = {
+                        r,
+                        c,
+                        type,
+                        caps,
+                        name,
+                        mfg,
+                        fw,
+                        paramCount,
+                        params: [],
+                        sizeR,
+                        sizeC,
+                        portLocR,
+                        portLocC,
+                    };
+                }
+                return;
+            }
+
+            if (evt.startsWith('param_def ')) {
+                const m = evt.match(/^param_def\s+r=(\d+)\s+c=(\d+)\s+pid=(\d+)\s+dt=(\d+)\s+name="([^"]*)"(.*)$/);
+                if (m) {
+                    const r = parseInt(m[1] || '0', 10);
+                    const c = parseInt(m[2] || '0', 10);
+                    const pid = parseInt(m[3] || '0', 10);
+                    const dt = parseInt(m[4] || '0', 10);
+                    const name = m[5] || '';
+                    const rest = m[6] || '';
+
+                    const readField = (label: string) => {
+                        const mm = rest.match(new RegExp(`\\s${label}=([^\\s]+)`));
+                        return mm ? mm[1] : null;
+                    };
+
+                    const min = readField('min') || undefined;
+                    const max = readField('max') || undefined;
+                    const value = readField('value') || undefined;
+
+                    const key = `${r},${c}`;
+                    if (!state.modules[key]) {
+                        // Should not happen if module_found came first, but safety check
+                        state.modules[key] = { r, c, type: 0, caps: 0, name: '(unknown)', mfg: '', fw: '', paramCount: 0, params: [], sizeR: 1, sizeC: 1, portLocR: 0, portLocC: 0 };
+                    }
+                    const mod = state.modules[key];
+                    // Remove existing if any (redefinition)
+                    mod.params = mod.params.filter(p => p.id !== pid);
+                    mod.params.push({
+                        id: pid,
+                        dt,
+                        name,
+                        min,
+                        max,
+                        value,
+                    });
+                    mod.params.sort((a, b) => a.id - b.id);
+                }
+                return;
+            }
+
+            if (evt.startsWith('param_changed ')) {
+                const m = evt.match(/^param_changed\s+r=(\d+)\s+c=(\d+)\s+pid=(\d+)\s+value=(.*)$/);
+                if (m) {
+                    const r = parseInt(m[1] || '0', 10);
+                    const c = parseInt(m[2] || '0', 10);
+                    const pid = parseInt(m[3] || '0', 10);
+                    const value = m[4] || '';
+
+                    const key = `${r},${c}`;
+                    const mod = state.modules[key];
+                    if (mod) {
+                        const p = mod.params.find(x => x.id === pid);
+                        if (p) {
+                            if (p.pendingUpdate && Date.now() - p.pendingUpdate < 2000) {
+                                // ignore
+                            } else {
+                                p.value = value;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
         if (line.startsWith('ok count=')) {
             state.mappings = [];
             return;

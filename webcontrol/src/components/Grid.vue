@@ -202,7 +202,11 @@ function getOriLabel(ori: number) {
                 </template>
 
                 <template v-else-if="!state.ports.items[cell.key]?.hasModule || !state.modules[cell.key]">
-                    <div>Empty<br><span class="loc">({{ cell.r }},{{ cell.c }})</span></div>
+                    <div>
+                        <span v-if="state.ports.items[cell.key]?.hasModule">Unidentified</span>
+                        <span v-else>Empty</span>
+                        <br><span class="loc">({{ cell.r }},{{ cell.c }})</span>
+                    </div>
                 </template>
 
                 <template v-else>

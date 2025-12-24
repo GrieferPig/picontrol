@@ -20,20 +20,20 @@ static uint32_t lastPingSentMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static volatile uint32_t lastHeardMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static uint32_t lastRxHighMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 
-static const __FlashStringHelper *orientationToString(ModuleOrientation o)
+static const char *orientationToString(ModuleOrientation o)
 {
     switch (o)
     {
     case ModuleOrientation::UP:
-        return F("UP");
+        return "UP";
     case ModuleOrientation::RIGHT:
-        return F("RIGHT");
+        return "RIGHT";
     case ModuleOrientation::DOWN:
-        return F("DOWN");
+        return "DOWN";
     case ModuleOrientation::LEFT:
-        return F("LEFT");
+        return "LEFT";
     default:
-        return F("?");
+        return "?";
     }
 }
 
@@ -51,27 +51,27 @@ static void ensureDetectionPinModes(int r, int c)
 
 static void logPortInsertion(int r, int c, const Port &port)
 {
-    UsbSerial.print(F("[PORT] Insert r="));
+    UsbSerial.print("[PORT] Insert r=");
     UsbSerial.print(r);
-    UsbSerial.print(F(" c="));
+    UsbSerial.print(" c=");
     UsbSerial.print(c);
-    UsbSerial.print(F(" hostTX="));
+    UsbSerial.print(" hostTX=");
     UsbSerial.print(port.txPin);
-    UsbSerial.print(F(" hostRX="));
+    UsbSerial.print(" hostRX=");
     UsbSerial.print(port.rxPin);
-    UsbSerial.print(F(" orientation="));
+    UsbSerial.print(" orientation=");
     UsbSerial.println(orientationToString(port.orientation));
 }
 
 static void logPortRemoval(int r, int c, const Port &port)
 {
-    UsbSerial.print(F("[PORT] Remove r="));
+    UsbSerial.print("[PORT] Remove r=");
     UsbSerial.print(r);
-    UsbSerial.print(F(" c="));
+    UsbSerial.print(" c=");
     UsbSerial.print(c);
-    UsbSerial.print(F(" hostTX="));
+    UsbSerial.print(" hostTX=");
     UsbSerial.print(port.txPin);
-    UsbSerial.print(F(" hostRX="));
+    UsbSerial.print(" hostRX=");
     UsbSerial.println(port.rxPin);
 }
 
@@ -109,7 +109,10 @@ static void messageSinkFromIRQ(ModuleMessage &msg)
     Port *p = getPort(msg.moduleRow, msg.moduleCol);
     if (p)
     {
-        p->hasModule = true;
+        // Do NOT set hasModule = true here.
+        // hasModule implies we have successfully fetched the module properties (name, params, etc).
+        // That logic is handled in module_task.cpp upon receiving CMD_GET_PROPERTIES response.
+
         // Any valid frame counts as proof-of-life.
         lastHeardMs[msg.moduleRow][msg.moduleCol] = millis();
     }
@@ -143,6 +146,11 @@ static void removePort(int r, int c)
     {
         pinMode(port.rxPin, INPUT_PULLDOWN);
     }
+
+    UsbSerial.print("event port_disconnected r=");
+    UsbSerial.print(r);
+    UsbSerial.print(" c=");
+    UsbSerial.println(c);
 }
 
 static void configurePortIfDetected(int r, int c)
@@ -217,6 +225,13 @@ static void configurePortIfDetected(int r, int c)
     lastRxHighMs[r][c] = digitalRead(port.rxPin) == HIGH ? now : 0;
 
     logPortInsertion(r, c, port);
+
+    UsbSerial.print("event port_connected r=");
+    UsbSerial.print(r);
+    UsbSerial.print(" c=");
+    UsbSerial.print(c);
+    UsbSerial.print(" orientation=");
+    UsbSerial.println((uint8_t)port.orientation);
 }
 
 Port *getPort(int row, int col)
@@ -309,13 +324,13 @@ void scanPorts()
 
             if (noRecentResponse && rxNeverHighInWindow)
             {
-                UsbSerial.print(F("[PORT] Remove (no response + RX low) r="));
+                UsbSerial.print("[PORT] Remove (no response + RX low) r=");
                 UsbSerial.print(r);
-                UsbSerial.print(F(" c="));
+                UsbSerial.print(" c=");
                 UsbSerial.print(c);
-                UsbSerial.print(F(" heardAgeMs="));
+                UsbSerial.print(" heardAgeMs=");
                 UsbSerial.print((uint32_t)(now - heard));
-                UsbSerial.print(F(" rxHighAgeMs="));
+                UsbSerial.print(" rxHighAgeMs=");
                 UsbSerial.println(rxHigh ? (uint32_t)(now - rxHigh) : 0);
                 removePort(r, c);
             }

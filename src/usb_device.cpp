@@ -145,18 +145,18 @@ namespace usb
     {
         if (msg && msg[0])
         {
-            UsbSerial.print(F("ok "));
+            UsbSerial.print("ok ");
             UsbSerial.println(msg);
         }
         else
         {
-            UsbSerial.println(F("ok"));
+            UsbSerial.println("ok");
         }
     }
 
     static void printlnErr(const char *msg)
     {
-        UsbSerial.print(F("err "));
+        UsbSerial.print("err ");
         UsbSerial.println(msg ? msg : "");
     }
 
@@ -329,7 +329,7 @@ namespace usb
             if (argc >= 2 && strcmp(argv[1], "list") == 0)
             {
                 const int n = MappingManager::count();
-                UsbSerial.print(F("ok count="));
+                UsbSerial.print("ok count=");
                 UsbSerial.println(n);
                 for (int i = 0; i < n; i++)
                 {
@@ -356,7 +356,7 @@ namespace usb
                         break;
                     }
 
-                    UsbSerial.print(F("map "));
+                    UsbSerial.print("map ");
                     UsbSerial.print(m->row);
                     UsbSerial.print(' ');
                     UsbSerial.print(m->col);
@@ -697,5 +697,19 @@ namespace usb
         if (!queue_try_add(&g_hidQ, &release))
             return false;
         return true;
+    }
+
+    bool sendKeyDown(uint8_t hidKeycode, uint8_t modifier)
+    {
+        initQueuesOnce();
+        HidKeyMsg press{modifier, hidKeycode};
+        return queue_try_add(&g_hidQ, &press);
+    }
+
+    bool sendKeyUp()
+    {
+        initQueuesOnce();
+        HidKeyMsg release{0, 0};
+        return queue_try_add(&g_hidQ, &release);
     }
 }
