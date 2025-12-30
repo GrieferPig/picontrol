@@ -11,6 +11,7 @@ namespace runtime_config
         static queue_t g_autoupdateQ;
         static queue_t g_rotationOverrideQ;
         static queue_t g_setParameterQ;
+        static queue_t g_syncMappingQ;
         static bool g_inited = false;
         static critical_section_t g_initLock;
         static bool g_initLockInited = false;
@@ -32,6 +33,7 @@ namespace runtime_config
                 queue_init(&g_autoupdateQ, sizeof(AutoupdateRequest), 32);
                 queue_init(&g_rotationOverrideQ, sizeof(RotationOverrideRequest), 32);
                 queue_init(&g_setParameterQ, sizeof(SetParameterRequest), 32);
+                queue_init(&g_syncMappingQ, sizeof(SyncMappingRequest), 32);
                 g_inited = true;
             }
             critical_section_exit(&g_initLock);
@@ -121,5 +123,31 @@ namespace runtime_config
     {
         initOnce();
         return queue_try_remove(&g_setParameterQ, &out);
+    }
+
+    bool enqueueSyncMapping(int row, int col)
+    {
+        initOnce();
+        SyncMappingRequest req{};
+        req.row = static_cast<int8_t>(row);
+        req.col = static_cast<int8_t>(col);
+        req.applyToAll = 0;
+        return queue_try_add(&g_syncMappingQ, &req);
+    }
+
+    bool enqueueSyncMappingAll()
+    {
+        initOnce();
+        SyncMappingRequest req{};
+        req.row = -1;
+        req.col = -1;
+        req.applyToAll = 1;
+        return queue_try_add(&g_syncMappingQ, &req);
+    }
+
+    bool tryDequeueSyncMapping(SyncMappingRequest &out)
+    {
+        initOnce();
+        return queue_try_remove(&g_syncMappingQ, &out);
     }
 }

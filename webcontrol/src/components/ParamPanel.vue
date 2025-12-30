@@ -30,6 +30,8 @@ function getMappingInfo(pid: number) {
     if (mapping.type === 1) return `Note ${midiNoteLabel(mapping.d2)} (Ch${mapping.d1})`;
     if (mapping.type === 2) return `CC ${mapping.d2} (Ch${mapping.d1})`;
     if (mapping.type === 3) return `Key ${hidKeyLabel(mapping.d1)}`;
+    if (mapping.type === 4) return `Pitch Bend (Ch${mapping.d1})`;
+    if (mapping.type === 5) return `Mod Wheel (Ch${mapping.d1})`;
     return 'Unmapped';
 }
 
@@ -63,25 +65,73 @@ async function updateParam(p: ModuleParam, newVal: string | number) {
         <div v-if="!selectedModule" class="hint-card">Select a module from the grid to view parameters.</div>
         <div v-else class="editor-panel" style="display:grid">
             <div v-for="p in params" :key="p.id" class="param-item" :class="{ selected: state.selected?.pid === p.id }" @click="selectParam(p.id)">
-                <span>{{ p.name || 'Param ' + p.id }}
-                    <input v-if="p.dt === 2" type="checkbox" class="param-value-input"
+                <div class="param-row">
+                    <span class="param-name">{{ p.name || 'Param ' + p.id }}</span>
+                    <input v-if="p.dt === 2" type="checkbox" class="param-input-bool"
                         :checked="p.value == 1 || p.value === 'true' || p.value === '1'"
                         :disabled="(p.access & 2) === 0"
                         @click.stop
                         @change="(e) => updateParam(p, (e.target as HTMLInputElement).checked ? '1' : '0')"
-                        style="width: auto; margin-left: 6px;"
                     >
-                    <input v-else type="number" class="param-value-input"
+                    <input v-else type="number" class="param-input-num"
                         :value="p.value"
                         :disabled="(p.access & 2) === 0"
                         :min="p.min" :max="p.max" :step="p.dt === 1 ? '0.01' : '1'"
                         @click.stop
                         @change="(e) => updateParam(p, (e.target as HTMLInputElement).value)"
-                        style="width: 60px; padding: 2px 4px; font-size: 11px; background: #0c0f18; border: 1px solid #3a3f4b; border-radius: 4px; color: #d1d5db; margin-left: 6px;"
                     >
-                </span>
+                </div>
                 <span class="val">{{ getMappingInfo(p.id) }}</span>
             </div>
         </div>
     </div>
 </template>
+
+<style scoped>
+.param-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px;
+    border-bottom: 1px solid #2a2f3b;
+    cursor: pointer;
+}
+.param-item:hover {
+    background: #1c1f2b;
+}
+.param-item.selected {
+    background: #2c3f5b;
+}
+.param-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.param-name {
+    font-weight: 500;
+}
+.param-input-num {
+    width: 70px;
+    padding: 4px 8px;
+    font-size: 12px;
+    background: #0c0f18;
+    border: 1px solid #3a3f4b;
+    border-radius: 4px;
+    color: #d1d5db;
+    transition: border-color 0.2s;
+}
+.param-input-num:focus {
+    border-color: #3b82f6;
+    outline: none;
+}
+.param-input-bool {
+    width: 16px;
+    height: 16px;
+    accent-color: #3b82f6;
+    cursor: pointer;
+}
+.val {
+    font-size: 11px;
+    color: #6b7280;
+}
+</style>

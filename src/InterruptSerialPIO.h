@@ -20,79 +20,56 @@
 
 #pragma once
 
-#include <Arduino.h>
-#include <hardware/gpio.h>
-#include <hardware/pio.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include "hardware/pio.h"
 #include "common.hpp"
 
-class InterruptSerialPIO
+#ifdef __cplusplus
+extern "C"
 {
-public:
-    static constexpr uint32_t FIXED_BAUD = 115200;
+#endif
 
-    volatile uint32_t lastByteReceivedTime;
+#define ISPIO_FIXED_BAUD 115200
 
-    InterruptSerialPIO(pin_size_t tx, pin_size_t rx);
-    ~InterruptSerialPIO();
-
-    // Fixed 115200 8N1
-    void begin(unsigned long baud = FIXED_BAUD);
-    void end();
-
-    // Metadata so parsed frames can include port info
-    void setPortLocation(uint8_t row, uint8_t col)
-    {
-        _row = row;
-        _col = col;
-    }
-
-    // Change pins
-    void setPins(pin_size_t tx, pin_size_t rx)
-    {
-        _tx = tx;
-        _rx = rx;
-    }
-
-    // Register a global sink invoked from IRQ when a frame is parsed
-    static void setMessageSink(void (*handler)(ModuleMessage &));
-
-    // TX
-    size_t write(uint8_t c); // bit-banged TX
-    size_t write(const uint8_t *buffer, size_t size);
-
-    // ISR entry
-    void _handleIRQ();
-
-private:
-    struct Parser
+    typedef struct
     {
         uint8_t buffer[MODULE_MAX_PAYLOAD + 5];
-        uint16_t length = 0;
-        uint16_t expectedLength = 0;
-        bool syncing = false;
-        uint32_t lastByteReceivedTime = 0;
-    } _parser;
+        uint16_t length;
+        uint16_t expectedLength;
+        bool syncing;
+        uint32_t lastByteReceivedTime;
+    } SerialParser;
 
-    static constexpr uint32_t PARSER_TIMEOUT_MS = 50;
+    typedef struct InterruptSerialPIO
+    {
+        volatile uint32_t lastByteReceivedTime;
+        bool running;
+        uint tx;
+        uint rx;
+        uint32_t bitCycles;
+        PIO rxPIO;
+        int rxSM;
+        uint rxOffset;
+        uint8_t row;
+        uint8_t col;
+        bool staticSM;
+        SerialParser parser;
+    } InterruptSerialPIO;
 
-    void resetParser();
-    void processByte(uint8_t b);
-    void emitFrame();
+    void ispio_init(InterruptSerialPIO *self, uint tx, uint rx);
+    void ispio_deinit(InterruptSerialPIO *self);
+    void ispio_begin(InterruptSerialPIO *self, unsigned long baud);
+    void ispio_end(InterruptSerialPIO *self);
+    void ispio_set_port_location(InterruptSerialPIO *self, uint8_t row, uint8_t col);
+    void ispio_set_pins(InterruptSerialPIO *self, uint tx, uint rx);
+    void ispio_set_pio_sm(InterruptSerialPIO *self, PIO pio, int sm);
+    void ispio_set_message_sink(void (*handler)(ModuleMessage *));
+    size_t ispio_write(InterruptSerialPIO *self, uint8_t c);
+    size_t ispio_write_buffer(InterruptSerialPIO *self, const uint8_t *buffer, size_t size);
+    void ispio_handle_irq(InterruptSerialPIO *self);
 
-    bool _running = false;
-    pin_size_t _tx, _rx;
-
-    PIO _rxPIO;
-    int _rxSM;
-    uint _rxOffset;
-
-    uint8_t _row = 0;
-    uint8_t _col = 0;
-
-    static void (*_messageSink)(ModuleMessage &);
-};
-
-#ifdef ARDUINO_NANO_RP2040_CONNECT
-// NINA updates
-extern InterruptSerialPIO Serial3;
+#ifdef __cplusplus
+}
 #endif

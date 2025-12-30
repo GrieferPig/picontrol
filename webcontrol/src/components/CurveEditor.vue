@@ -11,6 +11,7 @@ const props = defineProps<{
   ySteps?: number;
   maxPoints?: number;
   xDisplayMax?: number | string;
+  yDisplayMin?: number | string;
   yDisplayMax?: number | string;
 }>();
 
@@ -27,13 +28,41 @@ const defaultCurve: Curve = {
 
 const localCurve = ref<Curve>(JSON.parse(JSON.stringify(defaultCurve)));
 
+const isBinaryX = computed(() => props.xSteps === 2);
+const showControls = computed(() => !isBinaryX.value);
+
+function snapCurveForBinaryX() {
+  if (!isBinaryX.value) return;
+  if (!localCurve.value || localCurve.value.count < 2) return;
+
+  const p0 = localCurve.value.points[0];
+  if (!p0) return;
+
+  // For a binary input domain (0/1), curvature has no practical meaning.
+  // Keep the control point at a valid snapped position (endpoint-aligned)
+  // and hide it in the UI.
+  if (!localCurve.value.controls || localCurve.value.controls.length < 1) {
+    localCurve.value.controls = [{ x: p0.x, y: p0.y }];
+  }
+
+  localCurve.value.controls[0] = {
+    x: p0.x,
+    y: p0.y,
+  };
+}
+
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
     localCurve.value = JSON.parse(JSON.stringify(newVal));
   } else {
     localCurve.value = JSON.parse(JSON.stringify(defaultCurve));
   }
+  snapCurveForBinaryX();
 }, { immediate: true, deep: true });
+
+watch(isBinaryX, () => {
+  snapCurveForBinaryX();
+}, { immediate: true });
 
 // SVG Interaction
 const svgRef = ref<SVGSVGElement | null>(null);
@@ -49,8 +78,10 @@ function snapValue(val: number, steps?: number): number {
 function getMousePos(e: MouseEvent | TouchEvent): Point {
   if (!svgRef.value) return { x: 0, y: 0 };
   const rect = svgRef.value.getBoundingClientRect();
-  const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-  const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+
+  const touch = 'touches' in e ? (e.touches[0] ?? e.changedTouches[0]) : undefined;
+  const clientX = touch ? touch.clientX : (e as MouseEvent).clientX;
+  const clientY = touch ? touch.clientY : (e as MouseEvent).clientY;
   
   let x = (clientX - rect.left) / rect.width * 255;
   let y = 255 - (clientY - rect.top) / rect.height * 255; // Invert Y for display
@@ -101,8 +132,10 @@ function onDrag(e: MouseEvent | TouchEvent) {
         let minX = 0;
         let maxX = 255;
         
-        if (idx > 0) minX = localCurve.value.points[idx - 1].x;
-        if (idx < localCurve.value.points.length - 1) maxX = localCurve.value.points[idx + 1].x;
+        const prev = localCurve.value.points[idx - 1];
+        const next = localCurve.value.points[idx + 1];
+        if (prev) minX = prev.x;
+        if (next) maxX = next.x;
         
         // Enforce order
         if (pos.x < minX) pos.x = minX;
@@ -116,6 +149,8 @@ function onDrag(e: MouseEvent | TouchEvent) {
     const idx = dragging.value.index;
     const pStart = localCurve.value.points[idx];
     const pEnd = localCurve.value.points[idx+1];
+
+    if (!pStart || !pEnd) return;
     
     if (pos.x < pStart.x) pos.x = pStart.x;
     if (pos.x > pEnd.x) pos.x = pEnd.x;
@@ -146,15 +181,17 @@ function addPoint() {
   let maxGap = 0;
   let gapIdx = 0;
   for (let i = 0; i < localCurve.value.count - 1; i++) {
-    const gap = localCurve.value.points[i+1].x - localCurve.value.points[i].x;
+    const pA = localCurve.value.points[i]!;
+    const pB = localCurve.value.points[i + 1]!;
+    const gap = pB.x - pA.x;
     if (gap > maxGap) {
       maxGap = gap;
       gapIdx = i;
     }
   }
   
-  const p1 = localCurve.value.points[gapIdx];
-  const p2 = localCurve.value.points[gapIdx+1];
+  const p1 = localCurve.value.points[gapIdx]!;
+  const p2 = localCurve.value.points[gapIdx + 1]!;
   const newX = Math.round((p1.x + p2.x) / 2);
   const newY = Math.round((p1.y + p2.y) / 2);
   
@@ -187,11 +224,16 @@ function removePoint() {
 const pathD = computed(() => {
   if (!localCurve.value || localCurve.value.count < 2) return '';
   
-  let d = `M ${localCurve.value.points[0].x} ${255 - localCurve.value.points[0].y}`;
+  const p0 = localCurve.value.points[0];
+  if (!p0) return '';
+
+  let d = `M ${p0.x} ${255 - p0.y}`;
   
   for (let i = 0; i < localCurve.value.count - 1; i++) {
     const pNext = localCurve.value.points[i+1];
     const c = localCurve.value.controls[i];
+
+    if (!pNext || !c) break;
     
     // Quadratic Bezier: Q control, end
     d += ` Q ${c.x} ${255 - c.y}, ${pNext.x} ${255 - pNext.y}`;
@@ -226,21 +268,22 @@ const pathD = computed(() => {
           <path :d="pathD" fill="none" stroke="var(--accent)" stroke-width="3" />
           
           <!-- Control Lines -->
-          <g v-for="(c, i) in localCurve.controls" :key="'cl-'+i">
+          <g v-if="showControls" v-for="(c, i) in localCurve.controls" :key="'cl-'+i">
             <line 
-              :x1="localCurve.points[i].x" :y1="255 - localCurve.points[i].y" 
+              :x1="localCurve.points[i]!.x" :y1="255 - localCurve.points[i]!.y" 
               :x2="c.x" :y2="255 - c.y" 
               stroke="var(--muted)" stroke-dasharray="2,2" opacity="0.5"
             />
             <line 
               :x1="c.x" :y1="255 - c.y" 
-              :x2="localCurve.points[i+1].x" :y2="255 - localCurve.points[i+1].y" 
+              :x2="localCurve.points[i+1]!.x" :y2="255 - localCurve.points[i+1]!.y" 
               stroke="var(--muted)" stroke-dasharray="2,2" opacity="0.5"
             />
           </g>
           
           <!-- Control Points -->
           <circle 
+            v-if="showControls"
             v-for="(c, i) in localCurve.controls" :key="'c-'+i"
             :cx="c.x" :cy="255 - c.y" r="4" 
             fill="var(--accent-2)" cursor="pointer"
@@ -260,7 +303,7 @@ const pathD = computed(() => {
         
         <!-- Axis Values -->
         <div class="axis-val y-max">{{ yDisplayMax ?? 255 }}</div>
-        <div class="axis-val y-min">0</div>
+        <div class="axis-val y-min">{{ yDisplayMin ?? 0 }}</div>
         <div class="axis-val x-min">0</div>
         <div class="axis-val x-max">{{ xDisplayMax ?? 255 }}</div>
       </div>

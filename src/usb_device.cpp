@@ -93,6 +93,10 @@ namespace
             const uint core = get_core_num() & 1u;
             Pending &p = g_pending[core];
 
+            // Keep an internal per-core line buffer. Many call-sites build long
+            // log lines from lots of small Print::print() calls (e.g. modules list);
+            // a larger buffer reduces the number of queued chunks and prevents
+            // queue overflow/truncation during bursts.
             p.data[p.len++] = b;
             if (p.len >= sizeof(p.data) || b == '\n')
             {
@@ -111,8 +115,8 @@ namespace
     private:
         struct Pending
         {
-            uint8_t len = 0;
-            uint8_t data[64]{};
+            uint16_t len = 0;
+            uint8_t data[256]{};
         };
 
         static Pending g_pending[2];
@@ -305,6 +309,7 @@ namespace usb
                     return;
                 }
                 MappingManager::updateMapping((int)r, (int)c, pid, (ActionType)type, d1, d2);
+                (void)runtime_config::enqueueSyncMapping((int)r, (int)c);
                 printlnOk();
                 return;
             }
@@ -377,6 +382,7 @@ namespace usb
                 }
 
                 MappingManager::updateMappingCurve((int)r, (int)c, pid, curve);
+                (void)runtime_config::enqueueSyncMapping((int)r, (int)c);
                 printlnOk();
                 return;
             }
@@ -395,6 +401,7 @@ namespace usb
                     return;
                 }
                 const bool ok = MappingManager::deleteMapping((int)r, (int)c, pid);
+                (void)runtime_config::enqueueSyncMapping((int)r, (int)c);
                 printlnOk(ok ? "deleted" : "notfound");
                 return;
             }
@@ -423,6 +430,14 @@ namespace usb
                     case ACTION_KEYBOARD:
                         d1 = m->target.keyboard.keycode;
                         d2 = m->target.keyboard.modifier;
+                        break;
+                    case ACTION_MIDI_PITCH_BEND:
+                        d1 = m->target.midiCC.channel;
+                        d2 = 0;
+                        break;
+                    case ACTION_MIDI_MOD_WHEEL:
+                        d1 = m->target.midiCC.channel;
+                        d2 = 0;
                         break;
                     default:
                         break;
@@ -476,6 +491,7 @@ namespace usb
             if (argc >= 2 && strcmp(argv[1], "clear") == 0)
             {
                 MappingManager::clearAll();
+                (void)runtime_config::enqueueSyncMappingAll();
                 printlnOk();
                 return;
             }
@@ -783,6 +799,39 @@ namespace usb
         if (channel > 15)
             channel &= 0x0F;
         return enqueueMidi3(cable, (uint8_t)(0xB0 | channel), (uint8_t)(controller & 0x7F), (uint8_t)(value & 0x7F));
+    }
+
+    bool sendMidiCC14(uint8_t channel, uint8_t controllerMsb, uint16_t value14, uint8_t cable)
+    {
+        if (channel > 15)
+            channel &= 0x0F;
+        if (value14 > 16383)
+            value14 = 16383;
+
+        // 14-bit CC uses controller N (MSB) and controller N+32 (LSB)
+        const uint8_t msb = (uint8_t)((value14 >> 7) & 0x7F);
+        const uint8_t lsb = (uint8_t)(value14 & 0x7F);
+        const uint8_t ctrlMsb = (uint8_t)(controllerMsb & 0x7F);
+        const uint8_t ctrlLsb = (uint8_t)((controllerMsb + 32) & 0x7F);
+
+        // Best-effort: enqueue MSB then LSB.
+        if (!enqueueMidi3(cable, (uint8_t)(0xB0 | channel), ctrlMsb, msb))
+            return false;
+        if (!enqueueMidi3(cable, (uint8_t)(0xB0 | channel), ctrlLsb, lsb))
+            return false;
+        return true;
+    }
+
+    bool sendMidiPitchBend(uint8_t channel, uint16_t value14, uint8_t cable)
+    {
+        if (channel > 15)
+            channel &= 0x0F;
+        if (value14 > 16383)
+            value14 = 16383;
+
+        const uint8_t lsb = (uint8_t)(value14 & 0x7F);
+        const uint8_t msb = (uint8_t)((value14 >> 7) & 0x7F);
+        return enqueueMidi3(cable, (uint8_t)(0xE0 | channel), lsb, msb);
     }
 
     bool sendKeypress(uint8_t hidKeycode, uint8_t modifier)

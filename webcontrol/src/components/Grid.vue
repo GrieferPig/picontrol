@@ -223,6 +223,13 @@ function getOriLabel(ori: number) {
                         </div>
                         <span class="loc">({{ cell.r }},{{ cell.c }})</span>
                     </div>
+                    
+                    <div class="mod-params-grid">
+                        <div v-for="p in state.modules[cell.key].params" :key="p.id" class="mini-param" :title="p.name">
+                            {{ p.value }}
+                        </div>
+                    </div>
+
                     <div style="display:flex; gap:6px; flex-wrap:wrap;">
                         <button class="mini" @click.stop="toggleRot180(cell.key, coverage.anchors[cell.key])">
                             Rot 180°: {{ coverage.anchors[cell.key]?.rotate180 ? 'On' : 'Off' }}
@@ -233,3 +240,27 @@ function getOriLabel(ori: number) {
         </div>
     </div>
 </template>
+
+<style scoped>
+.mod-params-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    margin: 8px 0;
+    background: rgba(0,0,0,0.2);
+    padding: 4px;
+    border-radius: 4px;
+}
+.mini-param {
+    background: #1c1f2b;
+    color: #d1d5db;
+    font-size: 10px;
+    padding: 2px 4px;
+    border-radius: 2px;
+    text-align: center;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    border: 1px solid #3a3f4b;
+}
+</style>

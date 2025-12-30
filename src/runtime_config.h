@@ -48,4 +48,15 @@ namespace runtime_config
     // Set parameter request (sent from CDC to core1)
     bool enqueueSetParameter(int row, int col, uint8_t paramId, uint8_t dataType, const char *valueStr);
     bool tryDequeueSetParameter(SetParameterRequest &out);
+
+    // Sync mapping request (sent from CDC to core1)
+    struct SyncMappingRequest
+    {
+        int8_t row;
+        int8_t col;
+        uint8_t applyToAll; // 0/1
+    };
+    bool enqueueSyncMapping(int row, int col);
+    bool enqueueSyncMappingAll();
+    bool tryDequeueSyncMapping(SyncMappingRequest &out);
 }

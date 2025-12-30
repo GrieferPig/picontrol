@@ -8,7 +8,9 @@ enum ActionType : uint8_t
     ACTION_NONE = 0,
     ACTION_MIDI_NOTE,
     ACTION_MIDI_CC,
-    ACTION_KEYBOARD
+    ACTION_KEYBOARD,
+    ACTION_MIDI_PITCH_BEND,
+    ACTION_MIDI_MOD_WHEEL
 };
 
 struct ActionTargetMidiNote

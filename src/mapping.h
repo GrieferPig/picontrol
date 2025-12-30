@@ -23,6 +23,8 @@ public:
     static void updateMappingCurve(int r, int c, uint8_t pid, const Curve &curve);
     static bool deleteMapping(int r, int c, uint8_t pid);
     static void clearAll();
+    static void clearMappingsForPort(int r, int c);
+    static void addMapping(int r, int c, const ModuleMapping &m);
     static const ModuleMapping *findMapping(int r, int c, uint8_t pid);
 
     // Introspection (for config UI)

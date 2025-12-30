@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <cstring>
 #include <cstddef>
+#include <cstdarg>
+#include <cstdio>
 
 #include "port.h"
 #include "runtime_config.h"
@@ -24,9 +26,14 @@ static constexpr uint32_t PROPS_RETRY_INTERVAL_MS = 50;
 static constexpr uint8_t PROPS_MAX_ATTEMPTS = 10;
 
 static constexpr uint32_t PARAM_POLL_INTERVAL_MS = 50;
+static constexpr uint32_t POST_SET_PARAM_DELAY_MS = 20;
 static bool autoupdateEnabled[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static uint32_t lastParamPollMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static uint8_t nextParamIndex[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+
+static bool hasPendingParamPoll[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+static uint32_t pendingParamPollTime[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+static uint8_t pendingParamPollId[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 
 // Cache last seen values to support edge-triggered actions.
 static bool lastValueValid[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
@@ -48,6 +55,10 @@ static const char *commandToString(ModuleMessageId id)
         return "RESET_MODULE";
     case ModuleMessageId::CMD_SET_AUTOUPDATE:
         return "SET_AUTOUPDATE";
+    case ModuleMessageId::CMD_GET_MAPPINGS:
+        return "GET_MAPPINGS";
+    case ModuleMessageId::CMD_SET_MAPPINGS:
+        return "SET_MAPPINGS";
     case ModuleMessageId::CMD_RESPONSE:
         return "RESPONSE";
     default:
@@ -86,6 +97,39 @@ static bool parseValueFromResponse(const Port *port, uint8_t pid, const ModuleMe
     default:
         return false;
     }
+}
+
+static bool isValueInRange(const ModuleParameter &p, const ModuleParameterValue &v)
+{
+    switch (p.dataType)
+    {
+    case ModuleParameterDataType::PARAM_TYPE_INT:
+        return v.intValue >= p.minMax.intMin && v.intValue <= p.minMax.intMax;
+    case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+        return v.floatValue >= p.minMax.floatMin && v.floatValue <= p.minMax.floatMax;
+    default:
+        return true;
+    }
+}
+
+static ModuleParameterValue getResetValue(const ModuleParameter &p)
+{
+    ModuleParameterValue v{};
+    switch (p.dataType)
+    {
+    case ModuleParameterDataType::PARAM_TYPE_INT:
+        v.intValue = p.minMax.intMin;
+        break;
+    case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+        v.floatValue = p.minMax.floatMin;
+        break;
+    case ModuleParameterDataType::PARAM_TYPE_BOOL:
+        v.boolValue = 0;
+        break;
+    default:
+        break;
+    }
+    return v;
 }
 
 static bool valueEquals(ModuleParameterDataType dt, const ModuleParameterValue &a, const ModuleParameterValue &b)
@@ -244,6 +288,29 @@ static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterData
     const bool curBool = (mapCur >= 128);
     const bool prevBool = hadPrev ? (mapPrev >= 128) : false;
 
+    auto u8ToU14 = [](uint8_t v) -> uint16_t
+    {
+        // Scale 0..255 to 0..16383
+        return (uint16_t)(((uint32_t)v * 16383u + 127u) / 255u);
+    };
+
+    auto u8ToPitchBendSigned = [](uint8_t v) -> int16_t
+    {
+        // Map 0..255 into -8192..8191, forcing v=128 => 0 exactly.
+        if (v <= 128)
+        {
+            const int32_t d = (int32_t)128 - (int32_t)v; // 0..128
+            const int32_t neg = -(d * 8192) / 128;
+            return (int16_t)neg;
+        }
+        else
+        {
+            const int32_t d = (int32_t)v - (int32_t)128; // 1..127
+            const int32_t pos = (d * 8191) / 127;
+            return (int16_t)pos;
+        }
+    };
+
     switch (m->type)
     {
     case ACTION_MIDI_NOTE:
@@ -255,13 +322,21 @@ static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterData
         const uint8_t note = m->target.midiNote.noteNumber;
         // Use curve output as velocity (0-255 -> 0-127)
         const uint8_t vel = mapCur >> 1;
+        const uint8_t prevVel = hadPrev ? (mapPrev >> 1) : 0;
 
-        if (!hadPrev || curBool != prevBool)
+        // Note gating must NOT depend on the 50% threshold (which maps to vel>=64).
+        // MIDI Note On with velocity 0 is treated as Note Off by many synths, so:
+        // - Note On when vel > 0
+        // - Note Off when vel == 0
+        const bool curOn = (vel > 0);
+        const bool prevOn = hadPrev ? (prevVel > 0) : false;
+
+        if (!hadPrev || curOn != prevOn)
         {
-            if (curBool)
+            if (curOn)
                 usb::sendMidiNoteOn(ch, note, vel);
             else
-                usb::sendMidiNoteOff(ch, note, vel);
+                usb::sendMidiNoteOff(ch, note, 0);
         }
         break;
     }
@@ -278,6 +353,39 @@ static void applyMappingToUsb(const Port *port, uint8_t pid, ModuleParameterData
         if (!hadPrev || (mapCur >> 1) != (mapPrev >> 1))
         {
             usb::sendMidiCC(ch, cc, value);
+        }
+        break;
+    }
+    case ACTION_MIDI_PITCH_BEND:
+    {
+        uint8_t ch = m->target.midiCC.channel;
+        if (ch > 0)
+            ch -= 1;
+
+        const int16_t pb = u8ToPitchBendSigned(mapCur);
+        const int16_t pbPrev = hadPrev ? u8ToPitchBendSigned(mapPrev) : 0;
+
+        const uint16_t pb14 = (uint16_t)((int32_t)pb + 8192);
+        const uint16_t pbPrev14 = (uint16_t)((int32_t)pbPrev + 8192);
+
+        if (!hadPrev || pb14 != pbPrev14)
+        {
+            usb::sendMidiPitchBend(ch, pb14);
+        }
+        break;
+    }
+    case ACTION_MIDI_MOD_WHEEL:
+    {
+        uint8_t ch = m->target.midiCC.channel;
+        if (ch > 0)
+            ch -= 1;
+
+        // CC1 (MSB) + CC33 (LSB) as 14-bit value
+        const uint16_t v14 = u8ToU14(mapCur);
+        const uint16_t prev14 = hadPrev ? u8ToU14(mapPrev) : 0;
+        if (!hadPrev || v14 != prev14)
+        {
+            usb::sendMidiCC14(ch, 1, v14);
         }
         break;
     }
@@ -327,6 +435,7 @@ static void printHexBytes(const uint8_t *data, uint16_t len, uint16_t maxBytes =
 
 static void printMessageHuman(const ModuleMessage &msg, Port *port)
 {
+#ifdef DEBUG_MODULE_MESSAGES
     UsbSerial.print("[MSG] Port ");
     UsbSerial.print(msg.moduleRow);
     UsbSerial.print(',');
@@ -485,22 +594,17 @@ static void printMessageHuman(const ModuleMessage &msg, Port *port)
         UsbSerial.print("\"");
     }
     UsbSerial.println();
+#endif
 }
 
 void setup1()
 {
+    initBoardSerial();
     initPorts();
     runtime_config::init();
     runtime_query::init();
     MappingManager::init();
-    // Load persisted mappings on boot so default mappings are active
-    // even without a web panel issuing 'map load'. If no mapping file exists,
-    // this will clear to an empty default.
-    if (!MappingManager::load())
-    {
-        // Ensure a mapping file exists for subsequent boots.
-        MappingManager::save();
-    }
+    // Mappings are now loaded from modules, so no local load/save needed here.
     ModuleConfigManager::init();
     UsbSerial.println("piControl: core1 module scan ready");
 }
@@ -517,11 +621,46 @@ void loop1()
     {
         if (q.type == runtime_query::RequestType::LIST_MODULES)
         {
+            // `modules list` can be very bursty and previously built each line from many
+            // small Print::print() calls, which can overflow the CDC log queue and
+            // produce corrupted/truncated output when many modules are present.
+            // Instead, buffer the full response and emit it in one enqueue.
+
+            static char outBuf[48 * 1024];
+            size_t outPos = 0;
+            bool truncated = false;
+
+            auto appendf = [&](const char *fmt, ...)
+            {
+                if (truncated)
+                    return;
+                if (outPos >= sizeof(outBuf))
+                {
+                    truncated = true;
+                    return;
+                }
+
+                va_list ap;
+                va_start(ap, fmt);
+                const int n = vsnprintf(outBuf + outPos, sizeof(outBuf) - outPos, fmt, ap);
+                va_end(ap);
+
+                if (n < 0)
+                {
+                    truncated = true;
+                    return;
+                }
+                if ((size_t)n >= (sizeof(outBuf) - outPos))
+                {
+                    outPos = sizeof(outBuf);
+                    truncated = true;
+                    return;
+                }
+                outPos += (size_t)n;
+            };
+
             // Header includes grid size so the UI can render empty ports.
-            UsbSerial.print("ok ports rows=");
-            UsbSerial.print(MODULE_PORT_ROWS);
-            UsbSerial.print(" cols=");
-            UsbSerial.println(MODULE_PORT_COLS);
+            appendf("ok ports rows=%d cols=%d\n", MODULE_PORT_ROWS, MODULE_PORT_COLS);
 
             for (int r = 0; r < MODULE_PORT_ROWS; r++)
             {
@@ -531,96 +670,106 @@ void loop1()
                     if (!p)
                         continue;
 
-                    // Always emit port line.
-                    UsbSerial.print("port r=");
-                    UsbSerial.print(r);
-                    UsbSerial.print(" c=");
-                    UsbSerial.print(c);
-                    UsbSerial.print(" configured=");
-                    UsbSerial.print(p->configured ? 1 : 0);
-                    UsbSerial.print(" hasModule=");
-                    UsbSerial.print(p->hasModule ? 1 : 0);
-                    UsbSerial.print(" orientation=");
-                    UsbSerial.println((uint8_t)getEffectiveOrientation(p));
+                    appendf(
+                        "port r=%d c=%d configured=%d hasModule=%d orientation=%u\n",
+                        r, c,
+                        p->configured ? 1 : 0,
+                        p->hasModule ? 1 : 0,
+                        (uint8_t)getEffectiveOrientation(p));
 
                     if (!p->configured || !p->hasModule)
                         continue;
 
-                    UsbSerial.print("module r=");
-                    UsbSerial.print(r);
-                    UsbSerial.print(" c=");
-                    UsbSerial.print(c);
-                    UsbSerial.print(" type=");
-                    UsbSerial.print((uint8_t)p->module.type);
-                    UsbSerial.print(" caps=");
-                    UsbSerial.print(p->module.capabilities);
-                    UsbSerial.print(" name=\"");
-                    UsbSerial.print(p->module.name);
-                    UsbSerial.print("\" mfg=\"");
-                    UsbSerial.print(p->module.manufacturer);
-                    UsbSerial.print("\" fw=\"");
-                    UsbSerial.print(p->module.fwVersion);
-                    UsbSerial.print("\" params=");
-                    UsbSerial.print(p->module.parameterCount);
-                    UsbSerial.print(" szr=");
-                    UsbSerial.print(p->module.physicalSizeRow);
-                    UsbSerial.print(" szc=");
-                    UsbSerial.print(p->module.physicalSizeCol);
-                    UsbSerial.print(" plr=");
-                    UsbSerial.print(p->module.portLocationRow);
-                    UsbSerial.print(" plc=");
-                    UsbSerial.println(p->module.portLocationCol);
+                    appendf(
+                        "module r=%d c=%d type=%u caps=%u name=\"%s\" mfg=\"%s\" fw=\"%s\" params=%u szr=%u szc=%u plr=%u plc=%u\n",
+                        r, c,
+                        (uint8_t)p->module.type,
+                        (unsigned)p->module.capabilities,
+                        p->module.name,
+                        p->module.manufacturer,
+                        p->module.fwVersion,
+                        (unsigned)p->module.parameterCount,
+                        (unsigned)p->module.physicalSizeRow,
+                        (unsigned)p->module.physicalSizeCol,
+                        (unsigned)p->module.portLocationRow,
+                        (unsigned)p->module.portLocationCol);
 
                     const uint8_t pc = p->module.parameterCount;
                     for (uint8_t pid = 0; pid < pc && pid < 32; pid++)
                     {
                         const ModuleParameter &mp = p->module.parameters[pid];
-                        UsbSerial.print("param r=");
-                        UsbSerial.print(r);
-                        UsbSerial.print(" c=");
-                        UsbSerial.print(c);
-                        UsbSerial.print(" pid=");
-                        UsbSerial.print(mp.id);
-                        UsbSerial.print(" dt=");
-                        UsbSerial.print((uint8_t)mp.dataType);
-                        UsbSerial.print(" access=");
-                        UsbSerial.print(mp.access);
-                        UsbSerial.print(" name=\"");
-                        UsbSerial.print(mp.name);
-                        UsbSerial.print("\"");
 
-                        // Min/max/value are type-dependent.
                         switch (mp.dataType)
                         {
                         case ModuleParameterDataType::PARAM_TYPE_BOOL:
-                            UsbSerial.print(" min=0 max=1 value=");
-                            UsbSerial.print((int)mp.value.boolValue);
+                            appendf(
+                                "param r=%d c=%d pid=%u dt=%u access=%u name=\"%s\" min=0 max=1 value=%d\n",
+                                r, c,
+                                (unsigned)mp.id,
+                                (unsigned)mp.dataType,
+                                (unsigned)mp.access,
+                                mp.name,
+                                (int)mp.value.boolValue);
                             break;
                         case ModuleParameterDataType::PARAM_TYPE_INT:
-                            UsbSerial.print(" min=");
-                            UsbSerial.print(mp.minMax.intMin);
-                            UsbSerial.print(" max=");
-                            UsbSerial.print(mp.minMax.intMax);
-                            UsbSerial.print(" value=");
-                            UsbSerial.print(mp.value.intValue);
+                            appendf(
+                                "param r=%d c=%d pid=%u dt=%u access=%u name=\"%s\" min=%d max=%d value=%d\n",
+                                r, c,
+                                (unsigned)mp.id,
+                                (unsigned)mp.dataType,
+                                (unsigned)mp.access,
+                                mp.name,
+                                (int)mp.minMax.intMin,
+                                (int)mp.minMax.intMax,
+                                (int)mp.value.intValue);
                             break;
                         case ModuleParameterDataType::PARAM_TYPE_FLOAT:
-                            UsbSerial.print(" min=");
-                            UsbSerial.print(mp.minMax.floatMin, 6);
-                            UsbSerial.print(" max=");
-                            UsbSerial.print(mp.minMax.floatMax, 6);
-                            UsbSerial.print(" value=");
-                            UsbSerial.print(mp.value.floatValue, 6);
+                            appendf(
+                                "param r=%d c=%d pid=%u dt=%u access=%u name=\"%s\" min=%.6f max=%.6f value=%.6f\n",
+                                r, c,
+                                (unsigned)mp.id,
+                                (unsigned)mp.dataType,
+                                (unsigned)mp.access,
+                                mp.name,
+                                (double)mp.minMax.floatMin,
+                                (double)mp.minMax.floatMax,
+                                (double)mp.value.floatValue);
                             break;
                         default:
+                            appendf(
+                                "param r=%d c=%d pid=%u dt=%u access=%u name=\"%s\"\n",
+                                r, c,
+                                (unsigned)mp.id,
+                                (unsigned)mp.dataType,
+                                (unsigned)mp.access,
+                                mp.name);
                             break;
                         }
-                        UsbSerial.println();
+
+                        if (truncated)
+                            break;
                     }
+
+                    if (truncated)
+                        break;
                 }
+
+                if (truncated)
+                    break;
             }
 
-            UsbSerial.println("ok modules done");
+            if (truncated)
+            {
+                // Keep protocol sentinel line intact; add a soft warning line that the UI can ignore.
+                appendf("warn modules_list truncated=1\n");
+            }
+
+            appendf("ok modules done\n");
+
+            if (outPos > 0)
+            {
+                (void)usb::enqueueCdcWrite(reinterpret_cast<const uint8_t *>(outBuf), outPos);
+            }
         }
     }
 
@@ -713,17 +862,104 @@ void loop1()
 
             sendSetParameter(spreq.row, spreq.col, spreq.paramId, dt, val);
 
-            // Save to persistence if it's a writable parameter
-            if (spreq.paramId < p->module.parameterCount)
+            // Schedule a delayed poll to confirm the value.
+            // We wait a bit to allow the module to complete any blocking operations (like flash writes).
+            hasPendingParamPoll[spreq.row][spreq.col] = true;
+            pendingParamPollTime[spreq.row][spreq.col] = millis() + POST_SET_PARAM_DELAY_MS;
+            pendingParamPollId[spreq.row][spreq.col] = spreq.paramId;
+        }
+    }
+
+    // Handle sync mapping requests from core0
+    runtime_config::SyncMappingRequest smreq;
+    while (runtime_config::tryDequeueSyncMapping(smreq))
+    {
+        auto syncOne = [&](int row, int col)
+        {
+            Port *p = getPort(row, col);
+            if (!p || !p->configured || !p->hasModule)
+                return;
+
+            ModuleMessageSetMappingsPayload payload{};
+            payload.count = 0;
+
+            int total = MappingManager::count();
+            for (int i = 0; i < total; i++)
             {
-                const ModuleParameter &mp = p->module.parameters[spreq.paramId];
-                if (mp.access & ModuleParameterAccess::ACCESS_WRITE)
+                const ModuleMapping *m = MappingManager::getByIndex(i);
+                if (m && m->row == row && m->col == col)
                 {
-                    ModuleConfigManager::saveParamValue(spreq.row, spreq.col, spreq.paramId, dt, val);
+                    if (payload.count < 8)
+                    {
+                        WireModuleMapping &wm = payload.mappings[payload.count];
+                        wm.paramId = m->paramId;
+                        wm.type = (uint8_t)m->type;
+
+                        // Curve
+                        wm.curve.count = m->curve.count;
+                        for (int k = 0; k < 4; k++)
+                        {
+                            wm.curve.points[k].x = m->curve.points[k].x;
+                            wm.curve.points[k].y = m->curve.points[k].y;
+                        }
+                        for (int k = 0; k < 3; k++)
+                        {
+                            wm.curve.controls[k].x = m->curve.controls[k].x;
+                            wm.curve.controls[k].y = m->curve.controls[k].y;
+                        }
+
+                        // Target
+                        if (m->type == ACTION_MIDI_NOTE)
+                        {
+                            wm.target.midiNote.channel = m->target.midiNote.channel;
+                            wm.target.midiNote.noteNumber = m->target.midiNote.noteNumber;
+                            wm.target.midiNote.velocity = m->target.midiNote.velocity;
+                        }
+                        else if (m->type == ACTION_MIDI_CC)
+                        {
+                            wm.target.midiCC.channel = m->target.midiCC.channel;
+                            wm.target.midiCC.ccNumber = m->target.midiCC.ccNumber;
+                            wm.target.midiCC.value = m->target.midiCC.value;
+                        }
+                        else if (m->type == ACTION_MIDI_PITCH_BEND)
+                        {
+                            wm.target.midiCC.channel = m->target.midiCC.channel;
+                            wm.target.midiCC.ccNumber = 0;
+                            wm.target.midiCC.value = 0;
+                        }
+                        else if (m->type == ACTION_MIDI_MOD_WHEEL)
+                        {
+                            wm.target.midiCC.channel = m->target.midiCC.channel;
+                            wm.target.midiCC.ccNumber = 1;
+                            wm.target.midiCC.value = 0;
+                        }
+                        else if (m->type == ACTION_KEYBOARD)
+                        {
+                            wm.target.keyboard.keycode = m->target.keyboard.keycode;
+                            wm.target.keyboard.modifier = m->target.keyboard.modifier;
+                        }
+
+                        payload.count++;
+                    }
                 }
             }
 
-            sendGetParameter(spreq.row, spreq.col, spreq.paramId);
+            sendSetMappings(row, col, payload);
+        };
+
+        if (smreq.applyToAll)
+        {
+            for (int rr = 0; rr < MODULE_PORT_ROWS; rr++)
+            {
+                for (int cc = 0; cc < MODULE_PORT_COLS; cc++)
+                {
+                    syncOne(rr, cc);
+                }
+            }
+        }
+        else
+        {
+            syncOne(smreq.row, smreq.col);
         }
     }
 
@@ -742,6 +978,7 @@ void loop1()
                 autoupdateEnabled[r][c] = false;
                 lastParamPollMs[r][c] = 0;
                 nextParamIndex[r][c] = 0;
+                hasPendingParamPoll[r][c] = false;
                 for (int i = 0; i < 32; i++)
                 {
                     lastValueValid[r][c][i] = false;
@@ -769,6 +1006,13 @@ void loop1()
                 // Once module is known, stop retrying.
                 propsRequested[r][c] = true;
                 propsRequestAttempts[r][c] = PROPS_MAX_ATTEMPTS;
+            }
+
+            // Check for pending parameter polls (scheduled after SET_PARAMETER)
+            if (hasPendingParamPoll[r][c] && ((int32_t)(now - pendingParamPollTime[r][c]) >= 0))
+            {
+                sendGetParameter(r, c, pendingParamPollId[r][c]);
+                hasPendingParamPoll[r][c] = false;
             }
 
             // Polling mode: ask for one parameter per tick.
@@ -828,19 +1072,8 @@ void loop1()
                 bool wasNew = !port->hasModule;
                 port->hasModule = true;
 
-                // Restore persisted values for writable parameters
-                for (uint8_t i = 0; i < port->module.parameterCount; i++)
-                {
-                    const ModuleParameter &mp = port->module.parameters[i];
-                    if (mp.access & ModuleParameterAccess::ACCESS_WRITE)
-                    {
-                        ModuleParameterValue savedVal;
-                        if (ModuleConfigManager::getParamValue(port->row, port->col, i, mp.dataType, savedVal))
-                        {
-                            sendSetParameter(port->row, port->col, i, mp.dataType, savedVal);
-                        }
-                    }
-                }
+                // No longer restoring parameters from host persistence.
+                // Module is responsible for its own state.
 
                 if (wasNew)
                 {
@@ -848,6 +1081,9 @@ void loop1()
                     UsbSerial.print(port->row);
                     UsbSerial.print(" c=");
                     UsbSerial.println(port->col);
+
+                    // Fetch mappings from module
+                    sendGetMappings(port->row, port->col);
                 }
 
                 // Prefer module-driven updates if the module advertises support.
@@ -861,6 +1097,81 @@ void loop1()
                     autoupdateEnabled[port->row][port->col] = false;
                 }
             }
+            else if (port && resp.status == ModuleStatus::MODULE_STATUS_OK &&
+                     resp.inResponseTo == ModuleMessageId::CMD_GET_MAPPINGS &&
+                     resp.payloadLength >= 1)
+            {
+                ModuleMessageGetMappingsPayload mappingsPayload{};
+                uint16_t copyLen = resp.payloadLength;
+                if (copyLen > sizeof(mappingsPayload))
+                    copyLen = sizeof(mappingsPayload);
+                memcpy(&mappingsPayload, resp.payload, copyLen);
+
+                MappingManager::clearMappingsForPort(port->row, port->col);
+
+                for (int i = 0; i < mappingsPayload.count && i < 8; i++)
+                {
+                    const WireModuleMapping &wm = mappingsPayload.mappings[i];
+                    ModuleMapping m{};
+                    m.row = port->row;
+                    m.col = port->col;
+                    m.paramId = wm.paramId;
+                    m.type = (ActionType)wm.type;
+
+                    // Curve
+                    m.curve.count = wm.curve.count;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        m.curve.points[k].x = wm.curve.points[k].x;
+                        m.curve.points[k].y = wm.curve.points[k].y;
+                    }
+                    for (int k = 0; k < 3; k++)
+                    {
+                        m.curve.controls[k].x = wm.curve.controls[k].x;
+                        m.curve.controls[k].y = wm.curve.controls[k].y;
+                    }
+
+                    // Target
+                    if (m.type == ACTION_MIDI_NOTE)
+                    {
+                        m.target.midiNote.channel = wm.target.midiNote.channel;
+                        m.target.midiNote.noteNumber = wm.target.midiNote.noteNumber;
+                        m.target.midiNote.velocity = wm.target.midiNote.velocity;
+                    }
+                    else if (m.type == ACTION_MIDI_CC)
+                    {
+                        m.target.midiCC.channel = wm.target.midiCC.channel;
+                        m.target.midiCC.ccNumber = wm.target.midiCC.ccNumber;
+                        m.target.midiCC.value = wm.target.midiCC.value;
+                    }
+                    else if (m.type == ACTION_MIDI_PITCH_BEND)
+                    {
+                        m.target.midiCC.channel = wm.target.midiCC.channel;
+                        m.target.midiCC.ccNumber = 0;
+                        m.target.midiCC.value = 0;
+                    }
+                    else if (m.type == ACTION_MIDI_MOD_WHEEL)
+                    {
+                        m.target.midiCC.channel = wm.target.midiCC.channel;
+                        m.target.midiCC.ccNumber = 1;
+                        m.target.midiCC.value = 0;
+                    }
+                    else if (m.type == ACTION_KEYBOARD)
+                    {
+                        m.target.keyboard.keycode = wm.target.keyboard.keycode;
+                        m.target.keyboard.modifier = wm.target.keyboard.modifier;
+                    }
+
+                    MappingManager::addMapping(port->row, port->col, m);
+                }
+
+                UsbSerial.print("event mappings_loaded r=");
+                UsbSerial.print(port->row);
+                UsbSerial.print(" c=");
+                UsbSerial.print(port->col);
+                UsbSerial.print(" count=");
+                UsbSerial.println(mappingsPayload.count);
+            }
 
             // Treat any OK GET_PARAMETER response as a (possibly unsolicited) parameter update.
             if (port && resp.status == ModuleStatus::MODULE_STATUS_OK &&
@@ -873,6 +1184,20 @@ void loop1()
                     ModuleParameterValue cur{};
                     if (parseValueFromResponse(port, pid, resp, cur))
                     {
+                        if (!isValueInRange(port->module.parameters[pid], cur))
+                        {
+                            UsbSerial.print("event param_out_of_range r=");
+                            UsbSerial.print(port->row);
+                            UsbSerial.print(" c=");
+                            UsbSerial.print(port->col);
+                            UsbSerial.print(" pid=");
+                            UsbSerial.println(pid);
+
+                            ModuleParameterValue resetVal = getResetValue(port->module.parameters[pid]);
+                            sendSetParameter(port->row, port->col, pid, dt, resetVal);
+                            continue;
+                        }
+
                         ModuleParameterValue *prevPtr = nullptr;
                         ModuleParameterValue prev{};
                         if (lastValueValid[port->row][port->col][pid])

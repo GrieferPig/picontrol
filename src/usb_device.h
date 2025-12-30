@@ -21,6 +21,8 @@ namespace usb
     bool sendMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity, uint8_t cable = 0);
     bool sendMidiNoteOff(uint8_t channel, uint8_t note, uint8_t velocity, uint8_t cable = 0);
     bool sendMidiCC(uint8_t channel, uint8_t controller, uint8_t value, uint8_t cable = 0);
+    bool sendMidiCC14(uint8_t channel, uint8_t controllerMsb, uint16_t value14, uint8_t cable = 0);
+    bool sendMidiPitchBend(uint8_t channel, uint16_t value14, uint8_t cable = 0);
 
     // HID keyboard helpers (enqueue; core 0 sends)
     bool sendKeypress(uint8_t hidKeycode, uint8_t modifier = 0);

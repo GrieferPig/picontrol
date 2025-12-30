@@ -56,9 +56,30 @@ watch(() => state.selected?.pid, () => {
         editCc.value = 0;
         capturedKeycode.value = 0;
         capturedModmask.value = 0;
-        editCurve.value = undefined;
+        // Default curve depends on selected action type.
+        // For Pitch Bend, default should be a flat line at y=0 (center).
+        if (Number(editType.value) === 4) {
+            editCurve.value = {
+                count: 2,
+                points: [{ x: 0, y: 128 }, { x: 255, y: 128 }],
+                controls: [{ x: 128, y: 128 }],
+            };
+        } else {
+            editCurve.value = undefined;
+        }
     }
 }, { immediate: true });
+
+watch(() => editType.value, () => {
+    // If user switches to Pitch Bend and there is no existing curve yet, seed one.
+    if (!mapping.value && Number(editType.value) === 4 && !editCurve.value) {
+        editCurve.value = {
+            count: 2,
+            points: [{ x: 0, y: 128 }, { x: 255, y: 128 }],
+            controls: [{ x: 128, y: 128 }],
+        };
+    }
+});
 
 const humanHint = computed(() => {
     const t = Number(editType.value);
@@ -69,6 +90,10 @@ const humanHint = computed(() => {
         return `MIDI CC: CC ${editCc.value} (Ch${editCh.value})`;
     } else if (t === 3) {
         return `Keyboard: ${formatKeyComboDisplay(capturedKeycode.value, capturedModmask.value)} (${hidKeyLabel(capturedKeycode.value)} mod ${capturedModmask.value})`;
+    } else if (t === 4) {
+        return `Pitch Bend (Ch${editCh.value})`;
+    } else if (t === 5) {
+        return `Mod Wheel (CC1, Ch${editCh.value})`;
     }
     return 'Unmapped';
 });
@@ -80,6 +105,10 @@ const midiHint = computed(() => {
         return `Note name: ${midiNoteLabel(nn)}`;
     } else if (t === 2) {
         return `Controller: CC ${editCc.value} [${editCc.value}]`;
+    } else if (t === 4) {
+        return 'Pitch Bend range: -8192..8191';
+    } else if (t === 5) {
+        return 'Mod Wheel range: 0..16383 (14-bit)';
     }
     return '';
 });
@@ -145,6 +174,7 @@ const ySteps = computed(() => {
     const t = Number(editType.value);
     if (t === 1 || t === 2) return 128; // MIDI 0-127
     if (t === 3) return 2; // Keyboard 0/1
+    if (t === 4 || t === 5) return 0; // 14-bit, no snapping
     return 256; // Full range
 });
 
@@ -168,7 +198,15 @@ const yDisplayMax = computed(() => {
     const t = Number(editType.value);
     if (t === 1 || t === 2) return 127;
     if (t === 3) return 1;
+    if (t === 4) return 8191;
+    if (t === 5) return 16383;
     return 255;
+});
+
+const yDisplayMin = computed(() => {
+    const t = Number(editType.value);
+    if (t === 4) return -8192;
+    return 0;
 });
 
 const maxPoints = computed(() => {
@@ -182,12 +220,12 @@ async function apply() {
     const t = Number(editType.value);
     let d1v = 0;
     let d2v = 0;
-    if (t === 1 || t === 2) {
+    if (t === 1 || t === 2 || t === 4 || t === 5) {
         d1v = Number(editCh.value);
         if (t === 1) {
             d2v = notePartsToNumber(editNoteIndex.value, editOctave.value);
         } else {
-            d2v = Number(editCc.value);
+            d2v = (t === 2) ? Number(editCc.value) : 0;
         }
     } else if (t === 3) {
         d1v = capturedKeycode.value;
@@ -227,6 +265,9 @@ async function del() {
             <small class="muted" id="selectionLabel">{{ selectedParam ? `(${state.selected?.r},${state.selected?.c}) pid ${state.selected?.pid}` : 'Select a parameter' }}</small>
         </h2>
         <div v-if="!selectedParam" class="hint-card">Pick a parameter from the grid to edit its action.</div>
+        <div v-else-if="(selectedParam.access & 2) !== 0" class="hint-card">
+            This parameter is writable and cannot be mapped as a source.
+        </div>
         <div v-else class="editor-panel" style="display:grid">
             <div class="form-group">
                 <label>Selected parameter</label>
@@ -240,10 +281,12 @@ async function del() {
                     <option :value="1">MIDI Note</option>
                     <option :value="2">MIDI CC</option>
                     <option :value="3">Keyboard</option>
+                    <option :value="4">Pitch Bend</option>
+                    <option :value="5">Mod Wheel</option>
                 </select>
             </div>
 
-            <div v-if="editType == 1 || editType == 2" class="field-row" style="display:grid">
+            <div v-if="editType == 1 || editType == 2 || editType == 4 || editType == 5" class="field-row" style="display:grid">
                 <div class="form-group">
                     <label>Channel (1-16)</label>
                     <input type="number" v-model="editCh" min="1" max="16">
@@ -267,7 +310,7 @@ async function del() {
                     </div>
                 </template>
             </div>
-            <div v-if="editType == 1 || editType == 2" class="muted" style="font-size:12px;">{{ midiHint }}</div>
+            <div v-if="editType == 1 || editType == 2 || editType == 4 || editType == 5" class="muted" style="font-size:12px;">{{ midiHint }}</div>
 
             <div v-if="editType == 3" class="field-row" style="display:grid">
                 <div class="form-group">
@@ -283,12 +326,13 @@ async function del() {
                 <CurveEditor 
                     v-model="editCurve" 
                     :x-label="xLabel"
-                    :y-label="editType == 1 ? 'Velocity' : (editType == 2 ? 'Output' : (editType == 3 ? 'State' : 'Output'))"
+                    :y-label="editType == 1 ? 'Velocity' : (editType == 2 ? 'Output' : (editType == 3 ? 'State' : (editType == 4 ? 'Pitch Bend' : (editType == 5 ? 'Mod Wheel' : 'Output'))))"
                     :show-threshold="editType == 1 || editType == 3"
                     :x-steps="xSteps"
                     :y-steps="ySteps"
                     :max-points="maxPoints"
                     :x-display-max="xDisplayMax"
+                    :y-display-min="yDisplayMin"
                     :y-display-max="yDisplayMax"
                 />
             </div>

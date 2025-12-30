@@ -26,10 +26,6 @@ async function refresh() {
     await send('map list');
 }
 
-function save() {
-    send('map save');
-}
-
 function clear() {
     reset();
 }
@@ -56,7 +52,6 @@ async function toggleMock(e: Event) {
             {{ state.connection.connected ? 'Disconnect' : 'Connect Device' }}
         </button>
         <button id="btnRefresh" @click="refresh">Refresh</button>
-        <button id="btnSave" @click="save">Save to Flash</button>
         <button id="btnClear" class="ghost" @click="clear">Clear UI</button>
         <label class="toggle" title="When enabled, commands are handled locally (no WebSerial)">
             <input id="toggleMock" type="checkbox" :checked="state.env.mode === 'mock'" @change="toggleMock">

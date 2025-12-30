@@ -31,3 +31,5 @@ extern InterruptSerialPIO port3b;
 extern InterruptSerialPIO port3c;
 
 extern InterruptSerialPIO *modulePorts[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+
+void initBoardSerial();

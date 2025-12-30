@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-class InterruptSerialPIO;
+struct InterruptSerialPIO;
 
 static constexpr uint16_t MODULE_MAX_PAYLOAD = 2048; // 2KB payloads
 
@@ -140,6 +140,8 @@ typedef enum : uint8_t
     // Enables module-driven updates: when enabled, host should stop polling.
     // intervalMs==0 means "push only on change"; otherwise module may also push periodically.
     CMD_SET_AUTOUPDATE = 0x05,
+    CMD_GET_MAPPINGS = 0x06,
+    CMD_SET_MAPPINGS = 0x07,
     CMD_RESPONSE = 0x80,
 } ModuleMessageId;
 
@@ -188,6 +190,70 @@ typedef struct
     uint8_t enable;      // 0=disable (host polls), 1=enable (module pushes)
     uint16_t intervalMs; // 0=on-change only
 } ModuleMessageSetAutoupdatePayload;
+
+// Mapping structures for wire protocol
+// Must match ModuleMapping in module_mapping_config.h but packed
+#pragma pack(push, 1)
+struct WireCurvePoint
+{
+    uint8_t x;
+    uint8_t y;
+};
+
+struct WireCurve
+{
+    uint8_t count;
+    WireCurvePoint points[4];
+    WireCurvePoint controls[3];
+};
+
+struct WireActionTargetMidiNote
+{
+    uint8_t channel;
+    uint8_t noteNumber;
+    uint8_t velocity;
+};
+
+struct WireActionTargetMidiCC
+{
+    uint8_t channel;
+    uint8_t ccNumber;
+    uint8_t value;
+};
+
+struct WireActionTargetKeyboard
+{
+    uint8_t keycode;
+    uint8_t modifier;
+};
+
+union WireActionTarget
+{
+    WireActionTargetMidiNote midiNote;
+    WireActionTargetMidiCC midiCC;
+    WireActionTargetKeyboard keyboard;
+};
+
+struct WireModuleMapping
+{
+    uint8_t paramId;
+    uint8_t type; // ActionType
+    WireCurve curve;
+    WireActionTarget target;
+};
+
+typedef struct
+{
+    uint8_t count;
+    WireModuleMapping mappings[8]; // Max 8 mappings per module
+} ModuleMessageGetMappingsPayload;
+
+typedef struct
+{
+    uint8_t count;
+    WireModuleMapping mappings[8];
+} ModuleMessageSetMappingsPayload;
+#pragma pack(pop)
 
 typedef struct
 {

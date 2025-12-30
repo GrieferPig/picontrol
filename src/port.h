@@ -6,8 +6,15 @@
 Port *getPort(int row, int col);
 
 // ISR-facing queue helpers (do not use outside interrupt context)
-ModuleMessage *allocateMessageFromIRQ();
-void commitMessageFromIRQ();
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+    ModuleMessage *allocateMessageFromIRQ();
+    void commitMessageFromIRQ();
+#ifdef __cplusplus
+}
+#endif
 
 void initPorts();
 void scanPorts();
@@ -22,4 +29,6 @@ bool sendSetParameter(int row, int col, uint8_t parameterId, ModuleParameterData
 bool sendGetParameter(int row, int col, uint8_t parameterId);
 bool sendResetModule(int row, int col);
 bool sendSetAutoupdate(int row, int col, bool enable, uint16_t intervalMs = 0);
+bool sendSetMappings(int row, int col, const ModuleMessageSetMappingsPayload &payload);
+bool sendGetMappings(int row, int col);
 bool sendResponse(int row, int col, ModuleMessageId inResponseTo, ModuleStatus status, const uint8_t *payload, uint16_t payloadLen);

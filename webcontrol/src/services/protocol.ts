@@ -50,6 +50,12 @@ export function useProtocol() {
                 return { action: 'refresh_modules' };
             }
 
+            if (evt.startsWith('mappings_loaded ')) {
+                // Mappings were loaded from a module (or reloaded).
+                // Trigger a map list refresh so UI reflects persisted mappings.
+                return { action: 'refresh_mappings' };
+            }
+
             if (evt.startsWith('module_found ')) {
                 const m = evt.match(/^module_found\s+r=(\d+)\s+c=(\d+)\s+type=(\d+)\s+caps=(\d+)\s+name="([^"]*)"\s+mfg="([^"]*)"\s+fw="([^"]*)"\s+params=(\d+)(.*)$/);
                 if (m) {
@@ -120,6 +126,7 @@ export function useProtocol() {
                     const min = readField('min') || undefined;
                     const max = readField('max') || undefined;
                     const value = readField('value') || undefined;
+                    const access = 3; // Default for param_def
 
                     const key = `${r},${c}`;
                     if (!state.modules[key]) {
@@ -366,6 +373,7 @@ export function useProtocol() {
                             existing.value = value;
                         }
                         existing.dt = dt;
+                        existing.access = access;
                         existing.name = name;
                         existing.min = min;
                         existing.max = max;
@@ -374,6 +382,7 @@ export function useProtocol() {
                     mod.params.push({
                         id: pid,
                         dt,
+                        access,
                         name,
                         min,
                         max,

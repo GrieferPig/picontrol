@@ -1,6 +1,7 @@
 #include "port.h"
 #include <cstring>
 #include "usb_device.h"
+#include "mapping.h"
 
 // Framing: 0xAA, commandId, payloadLenLo, payloadLenHi, payload..., checksum(sum of all prior bytes)
 static constexpr uint8_t FRAME_START = 0xAA;
@@ -37,6 +38,57 @@ static const char *orientationToString(ModuleOrientation o)
     }
 }
 
+#ifdef DEBUG_MODULE_MESSAGES
+static const char *commandToStringTx(ModuleMessageId id)
+{
+    switch (id)
+    {
+    case ModuleMessageId::CMD_PING:
+        return "PING";
+    case ModuleMessageId::CMD_GET_PROPERTIES:
+        return "GET_PROPERTIES";
+    case ModuleMessageId::CMD_SET_PARAMETER:
+        return "SET_PARAMETER";
+    case ModuleMessageId::CMD_GET_PARAMETER:
+        return "GET_PARAMETER";
+    case ModuleMessageId::CMD_RESET_MODULE:
+        return "RESET_MODULE";
+    case ModuleMessageId::CMD_SET_AUTOUPDATE:
+        return "SET_AUTOUPDATE";
+    case ModuleMessageId::CMD_GET_MAPPINGS:
+        return "GET_MAPPINGS";
+    case ModuleMessageId::CMD_SET_MAPPINGS:
+        return "SET_MAPPINGS";
+    case ModuleMessageId::CMD_RESPONSE:
+        return "RESPONSE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static void printHexBytesTx(const uint8_t *data, uint16_t len, uint16_t maxBytes = 16)
+{
+    if (!data || len == 0)
+    {
+        UsbSerial.print("<empty>");
+        return;
+    }
+    uint16_t toPrint = len;
+    if (toPrint > maxBytes)
+        toPrint = maxBytes;
+    for (uint16_t i = 0; i < toPrint; i++)
+    {
+        if (data[i] < 0x10)
+            UsbSerial.print('0');
+        UsbSerial.print(data[i], HEX);
+        if (i + 1 < toPrint)
+            UsbSerial.print(' ');
+    }
+    if (len > toPrint)
+        UsbSerial.print(" ...");
+}
+#endif
+
 static void ensureDetectionPinModes(int r, int c)
 {
     if (portTxPins[r][c] != PORT_PIN_UNUSED)
@@ -51,6 +103,7 @@ static void ensureDetectionPinModes(int r, int c)
 
 static void logPortInsertion(int r, int c, const Port &port)
 {
+#ifdef DEBUG_MODULE_MESSAGES
     UsbSerial.print("[PORT] Insert r=");
     UsbSerial.print(r);
     UsbSerial.print(" c=");
@@ -61,10 +114,12 @@ static void logPortInsertion(int r, int c, const Port &port)
     UsbSerial.print(port.rxPin);
     UsbSerial.print(" orientation=");
     UsbSerial.println(orientationToString(port.orientation));
+#endif
 }
 
 static void logPortRemoval(int r, int c, const Port &port)
 {
+#ifdef DEBUG_MODULE_MESSAGES
     UsbSerial.print("[PORT] Remove r=");
     UsbSerial.print(r);
     UsbSerial.print(" c=");
@@ -73,6 +128,7 @@ static void logPortRemoval(int r, int c, const Port &port)
     UsbSerial.print(port.txPin);
     UsbSerial.print(" hostRX=");
     UsbSerial.println(port.rxPin);
+#endif
 }
 
 static uint8_t calcChecksum(const uint8_t *data, size_t len)
@@ -104,9 +160,9 @@ void commitMessageFromIRQ()
     messageCount++;
 }
 
-static void messageSinkFromIRQ(ModuleMessage &msg)
+static void messageSinkFromIRQ(ModuleMessage *msg)
 {
-    Port *p = getPort(msg.moduleRow, msg.moduleCol);
+    Port *p = getPort(msg->moduleRow, msg->moduleCol);
     if (p)
     {
         // Do NOT set hasModule = true here.
@@ -114,7 +170,7 @@ static void messageSinkFromIRQ(ModuleMessage &msg)
         // That logic is handled in module_task.cpp upon receiving CMD_GET_PROPERTIES response.
 
         // Any valid frame counts as proof-of-life.
-        lastHeardMs[msg.moduleRow][msg.moduleCol] = millis();
+        lastHeardMs[msg->moduleRow][msg->moduleCol] = millis();
     }
 }
 
@@ -128,11 +184,13 @@ static void removePort(int r, int c)
 
     logPortRemoval(r, c, port);
 
-    port.serial->end();
+    ispio_end(port.serial);
     port.serial = nullptr;
     port.configured = false;
     port.hasModule = false;
     port.module = {};
+
+    MappingManager::clearMappingsForPort(r, c);
 
     lastPingSentMs[r][c] = 0;
     lastHeardMs[r][c] = 0;
@@ -211,10 +269,10 @@ static void configurePortIfDetected(int r, int c)
     }
 
     // Apply pin swap
-    serial->setPins(port.txPin, port.rxPin);
+    ispio_set_pins(serial, port.txPin, port.rxPin);
 
-    serial->setPortLocation(r, c);
-    serial->begin(InterruptSerialPIO::FIXED_BAUD);
+    ispio_set_port_location(serial, r, c);
+    ispio_begin(serial, ISPIO_FIXED_BAUD);
     port.serial = serial;
     port.configured = true;
     lastDetectMs[r][c] = now;
@@ -245,7 +303,7 @@ Port *getPort(int row, int col)
 
 void initPorts()
 {
-    InterruptSerialPIO::setMessageSink(messageSinkFromIRQ);
+    ispio_set_message_sink(messageSinkFromIRQ);
 
     for (int r = 0; r < MODULE_PORT_ROWS; r++)
     {
@@ -293,14 +351,6 @@ void scanPorts()
                 continue;
             }
 
-            if (now - lastPingSentMs[r][c] >= PING_INTERVAL_MS)
-            {
-                if (sendPing(r, c))
-                {
-                    lastPingSentMs[r][c] = now;
-                }
-            }
-
             // Track whether RX has been observed HIGH (UART idle) recently.
             // This is sampled opportunistically during scans.
             if (digitalRead(port.rxPin) == HIGH)
@@ -324,6 +374,7 @@ void scanPorts()
 
             if (noRecentResponse && rxNeverHighInWindow)
             {
+#ifdef DDEBUG_MODULE_MESSAGES
                 UsbSerial.print("[PORT] Remove (no response + RX low) r=");
                 UsbSerial.print(r);
                 UsbSerial.print(" c=");
@@ -332,6 +383,7 @@ void scanPorts()
                 UsbSerial.print((uint32_t)(now - heard));
                 UsbSerial.print(" rxHighAgeMs=");
                 UsbSerial.println(rxHigh ? (uint32_t)(now - rxHigh) : 0);
+#endif
                 removePort(r, c);
             }
         }
@@ -351,6 +403,22 @@ bool sendMessage(int row, int col, ModuleMessageId commandId, const uint8_t *pay
         payloadLen = MODULE_MAX_PAYLOAD;
     }
 
+#ifdef DEBUG_MODULE_MESSAGES
+    UsbSerial.print("[TX] Port ");
+    UsbSerial.print(row);
+    UsbSerial.print(',');
+    UsbSerial.print(col);
+    UsbSerial.print(" cmd=");
+    UsbSerial.print(commandToStringTx(commandId));
+    UsbSerial.print(" (0x");
+    UsbSerial.print(static_cast<uint8_t>(commandId), HEX);
+    UsbSerial.print(") len=");
+    UsbSerial.print(payloadLen);
+    UsbSerial.print(" data=");
+    printHexBytesTx(payload, payloadLen);
+    UsbSerial.println();
+#endif
+
     uint8_t frameHeader[4];
     frameHeader[0] = FRAME_START;
     frameHeader[1] = static_cast<uint8_t>(commandId);
@@ -363,12 +431,12 @@ bool sendMessage(int row, int col, ModuleMessageId commandId, const uint8_t *pay
         checksum = static_cast<uint8_t>(checksum + payload[i]);
     }
 
-    port->serial->write(frameHeader, sizeof(frameHeader));
+    ispio_write_buffer(port->serial, frameHeader, sizeof(frameHeader));
     if (payloadLen > 0)
     {
-        port->serial->write(payload, payloadLen);
+        ispio_write_buffer(port->serial, payload, payloadLen);
     }
-    port->serial->write(checksum);
+    ispio_write(port->serial, checksum);
     return true;
 }
 
@@ -410,6 +478,16 @@ bool sendSetAutoupdate(int row, int col, bool enable, uint16_t intervalMs)
     payload.enable = enable ? 1 : 0;
     payload.intervalMs = intervalMs;
     return sendMessage(row, col, ModuleMessageId::CMD_SET_AUTOUPDATE, reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
+}
+
+bool sendSetMappings(int row, int col, const ModuleMessageSetMappingsPayload &payload)
+{
+    return sendMessage(row, col, ModuleMessageId::CMD_SET_MAPPINGS, (const uint8_t *)&payload, sizeof(payload));
+}
+
+bool sendGetMappings(int row, int col)
+{
+    return sendMessage(row, col, ModuleMessageId::CMD_GET_MAPPINGS, nullptr, 0);
 }
 
 bool sendResponse(int row, int col, ModuleMessageId inResponseTo, ModuleStatus status, const uint8_t *payload, uint16_t payloadLen)

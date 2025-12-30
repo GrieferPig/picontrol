@@ -18,8 +18,8 @@ const sampleModules = [
         portLocR: 1,
         portLocC: 0,
         params: [
-            { id: 0, dt: 0, name: 'Level', min: 0, max: 127, value: 64 },
-            { id: 1, dt: 2, name: 'Mute', min: 0, max: 1, value: 0 },
+            { id: 0, dt: 0, name: 'Level', min: 0, max: 127, value: 64, access: 3 },
+            { id: 1, dt: 2, name: 'Mute', min: 0, max: 1, value: 0, access: 3 },
         ],
     },
     {
@@ -35,8 +35,8 @@ const sampleModules = [
         portLocR: 0,
         portLocC: 0,
         params: [
-            { id: 0, dt: 1, name: 'Pan', min: -1.0, max: 1.0, value: 0.0 },
-            { id: 1, dt: 0, name: 'Gain', min: 0, max: 100, value: 35 },
+            { id: 0, dt: 1, name: 'Pan', min: -1.0, max: 1.0, value: 0.0, access: 3 },
+            { id: 1, dt: 0, name: 'Gain', min: 0, max: 100, value: 35, access: 3 },
         ],
     },
     {
@@ -52,7 +52,7 @@ const sampleModules = [
         portLocR: 0,
         portLocC: 0,
         params: [
-            { id: 0, dt: 2, name: 'Pressed', min: 0, max: 1, value: 0 },
+            { id: 0, dt: 2, name: 'Pressed', min: 0, max: 1, value: 0, access: 1 },
         ],
     },
 ];
@@ -91,7 +91,7 @@ export function useMock() {
                 const plc = mod.portLocC || 0;
                 handleLine(`module r=${r} c=${c} type=${mod.type} caps=${mod.caps} name="${mod.name}" mfg="${mod.mfg}" fw="${mod.fw}" params=${mod.params.length} szr=${mod.sizeR || 1} szc=${mod.sizeC || 1} plr=${plr} plc=${plc}`);
                 mod.params.forEach((p) => {
-                    handleLine(`param r=${r} c=${c} pid=${p.id} dt=${p.dt} name="${p.name}" min=${p.min} max=${p.max} value=${p.value}`);
+                    handleLine(`param r=${r} c=${c} pid=${p.id} dt=${p.dt} access=${p.access || 3} name="${p.name}" min=${p.min} max=${p.max} value=${p.value}`);
                 });
             }
         }

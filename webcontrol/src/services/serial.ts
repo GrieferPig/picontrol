@@ -8,6 +8,9 @@ let reader: ReadableStreamDefaultReader<string> | null = null;
 let writer: WritableStreamDefaultWriter<string> | null = null;
 let inputBuffer = '';
 let refreshIntervalId: number | null = null;
+let processingPromise: Promise<void> | null = null;
+let refreshModulesRequested = false;
+let refreshMappingsRequested = false;
 
 export function useSerial() {
     const { state } = useStore();
@@ -86,6 +89,52 @@ export function useSerial() {
         logAdd(`TX: ${cmd}`);
     }
 
+    function scheduleProcessing() {
+        if (processingPromise) return;
+
+        processingPromise = (async () => {
+            while (port && port.readable && reader) {
+                const lines = inputBuffer.split(/\r?\n/);
+                inputBuffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    const result = handleLine(trimmed);
+                    if (result && result.action === 'refresh_modules') {
+                        refreshModulesRequested = true;
+                    }
+                    if (result && result.action === 'refresh_mappings') {
+                        refreshMappingsRequested = true;
+                    }
+                }
+
+                if (refreshModulesRequested) {
+                    refreshModulesRequested = false;
+                    await send('modules list');
+                    continue;
+                }
+
+                if (refreshMappingsRequested) {
+                    refreshMappingsRequested = false;
+                    await send('map list');
+                    continue;
+                }
+
+                // No refresh pending and no more complete lines to process.
+                if (!/\r?\n/.test(inputBuffer)) {
+                    break;
+                }
+            }
+        })().finally(() => {
+            processingPromise = null;
+            // If new data arrived while we were awaiting, process again.
+            if (refreshModulesRequested || refreshMappingsRequested || /\r?\n/.test(inputBuffer)) {
+                scheduleProcessing();
+            }
+        });
+    }
+
     async function readLoop() {
         while (port && port.readable && reader) {
             try {
@@ -93,23 +142,11 @@ export function useSerial() {
                 if (done) break;
                 if (value) {
                     inputBuffer += value;
-                    processBuffer();
+                    scheduleProcessing();
                 }
             } catch (err) {
                 logAdd(`Read error: ${err}`);
                 break;
-            }
-        }
-    }
-
-    async function processBuffer() {
-        const lines = inputBuffer.split(/\r?\n/);
-        inputBuffer = lines.pop() || '';
-        for (const line of lines) {
-            if (!line.trim()) continue;
-            const result = handleLine(line.trim());
-            if (result && result.action === 'refresh_modules') {
-                await send('modules list');
             }
         }
     }
