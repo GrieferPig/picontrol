@@ -1,56 +1,165 @@
-# Copilot instructions (picontrol)
+# piControl Codebase Guide
 
-## Big picture
-- This repo has two parts:
-  - Firmware for Raspberry Pi Pico (PlatformIO + Earle Philhower Arduino core): `src/`
-  - Web UI (Vue 3 + Vite, uses WebSerial): `webcontrol/`
-- The device exposes a USB composite (CDC serial + MIDI + HID keyboard). All host control from the web UI is via newline-delimited CDC text commands.
+## Architecture Overview
 
-## Firmware architecture (core0 vs core1)
-- `src/main.cpp`: core0 owns USB. It calls `usb::task()` frequently.
-- `src/module_task.cpp`: core1 owns “module grid” logic (`setup1()/loop1()`). It scans ports, polls modules, applies mappings, and prints status.
-- Critical invariant: do not call TinyUSB/Adafruit TinyUSB APIs from core1. Route everything through `usb::` helpers in `src/usb_device.*`.
-  - Use `UsbSerial` for logging from either core (it enqueues to a core0 queue).
-  - For cross-core requests from CDC → core1, use the queue-based helpers:
-    - `runtime_query::enqueueListModules()` / `tryDequeue()` (`src/runtime_query.*`)
-    - `runtime_config::*` enqueue/tryDequeue APIs (`src/runtime_config.*`)
+piControl is a **dual-core Raspberry Pi Pico firmware + Vue web interface** for a modular MIDI/HID controller system. Physical control modules (faders, knobs, buttons) connect via UART and send parameter updates that get mapped to MIDI/keyboard actions.
 
-## Module/port protocol and data flow
-- Physical ports are scanned and auto-configured in `src/port.cpp`:
-  - Detection rule: exactly one of the two candidate pins is HIGH; that pin is module TX (host RX) and also determines `ModuleOrientation`.
-  - Module on-wire framing: `0xAA, commandId, payloadLenLo, payloadLenHi, payload..., checksum(sum of prior bytes)`.
-- On-wire structs are tightly packed (`#pragma pack(push, 1)`) in `src/common.hpp`. Keep them packed and update `static_assert`s when changing payload sizes.
+### Core Components
 
-## CDC text protocol (used by the web UI)
-- Parsed on core0 in `usb::processCommand()` (`src/usb_device.cpp`). Commands are newline-delimited.
-- Commands expected by the UI (`webcontrol/src/services/serial.ts` / `protocol.ts`):
-  - `modules list` → queues an async dump; core1 prints:
-    - `ok ports rows=<R> cols=<C>`
-    - `port r=<r> c=<c> configured=<0|1> hasModule=<0|1> orientation=<n>`
-    - `module r=<r> c=<c> type=<n> caps=<n> name="..." mfg="..." fw="..." params=<n> szr=<n> szc=<n> plr=<n> plc=<n>`
-    - `param r=<r> c=<c> pid=<n> dt=<n> name="..." min=<...> max=<...> value=<...>`
-    - `ok modules done`
-  - Mapping commands (persisted): `map set ...`, `map del ...`, `map list`, `map clear`, `map save`, `map load`
-  - Runtime controls: `autoupdate set ...` / `autoupdate all ...`, `rot set ...` / `rot all ...`, `param set r c pid datatype value`
-- If you change any output line format, update the parsers in `webcontrol/src/services/protocol.ts`.
+1. **Firmware (PlatformIO/Arduino)** - RP2040 dual-core embedded system
+2. **Web Interface (Vue 3 + TypeScript + Vite)** - Browser-based configuration UI via Web Serial API
 
-## Persistence
-- Mapping persistence uses LittleFS and a binary file in `src/mapping.cpp`:
-  - File: `/mappings.bin` with header/checksum (`MAGIC_MAP1`), max 32 entries.
-- Rotation overrides persist via LittleFS in `src/module_config_manager.cpp`:
-  - File: `/modconfig.bin` (`MAGIC_CFG1`)
+## Critical Architecture Patterns
 
-## Webcontrol conventions
-- Web UI runs in “real” mode (WebSerial) or “mock” mode (interprets a subset of commands) via `state.env.mode`.
-  - Real transport: `webcontrol/src/services/serial.ts`
-  - Command routing / mock emulation: `webcontrol/src/services/router.ts`
-- Dev workflow uses Bun (see `webcontrol/README.md`): `bun install`, `bun dev`, `bun run build`.
+### Dual-Core Design (RP2040)
 
-## Common workflows
-- Firmware (PlatformIO):
-  - Build: `platformio run -e pico`
-  - Upload: `platformio run -e pico -t upload`
-- When adding new cross-core functionality:
-  - Add a queue request type in `src/runtime_query.*` or `src/runtime_config.*`
-  - Enqueue from `usb_device.cpp` (core0), handle in `module_task.cpp` (core1)
-  - Emit CDC lines through `UsbSerial` and keep them parseable by the UI
+**Core 0** ([main.cpp](src/main.cpp)): USB tasks only (TinyUSB CDC, MIDI, HID)  
+**Core 1** ([module_task.cpp](src/module_task.cpp)): Module communication, message routing, mapping execution
+
+- Communication between cores uses **Pico SDK queues** (thread-safe, lock-free)
+- Examples: `runtime_config`, `runtime_query` namespaces with `enqueue*/tryDequeue*` functions
+- Never call TinyUSB APIs from Core 1 - queue messages to Core 0 instead
+
+### Module Communication Protocol
+
+Modules connect via **PIO-based UART** ([InterruptSerialPIO](src/InterruptSerialPIO.h)) at 115200 baud. Each physical port has dedicated GPIO pins defined in [boardconfig.h](src/boardconfig.h).
+
+**Message structure** (see [common.hpp](src/common.hpp)):
+- Binary framed protocol with `ModuleMessage` struct
+- Commands: `PING`, `GET_PROPERTIES`, `SET_PARAMETER`, `GET_PARAMETER`, `SET_MAPPINGS`, etc.
+- Responses include `ModuleStatus` (OK/ERROR/UNSUPPORTED)
+
+**Key workflow**:
+1. Module connects → `port_connected` event → firmware sends `GET_PROPERTIES`
+2. Module responds with capabilities (type, parameters, name) → stored in `Port` struct
+3. Web UI queries via `modules list` CDC command → firmware streams module data
+4. User creates mappings → firmware syncs them to module flash via `SET_MAPPINGS`
+
+### Mapping System
+
+**Purpose**: Convert module parameter changes → MIDI/HID actions
+
+[mapping.h](src/mapping.h) defines `ModuleMapping` with:
+- Source: `row`, `col`, `parameterId` 
+- Target: `ActionType` (MIDI_NOTE, MIDI_CC, KEYBOARD, PITCH_BEND, MOD_WHEEL)
+- Optional: `Curve` for non-linear response (quadratic Bézier, see [curve.h](src/curve.h))
+
+**Storage**: Mappings persist in Pico's LittleFS (512KB partition). Changes in web UI → `map set` CDC command → `MappingManager::updateMapping()` → `enqueueSyncMapping()` → Core 1 sends `SET_MAPPINGS` to module.
+
+### Web Serial Command Interface
+
+[usb_device.cpp](src/usb_device.cpp) `processCommand()` parses text commands from Web Serial:
+- `modules list` - Enumerate all detected modules with parameters
+- `map set r c pid type d1 d2` - Create/update mapping
+- `map set_curve r c pid <hex>` - Set curve (hex-encoded binary)
+- `map del r c pid` - Delete mapping
+- `map list` - List all mappings
+- `param set r c pid <value>` - Set module parameter value
+
+Responses: `ok [data]` or `err [message]`
+
+**Events** (sent asynchronously):
+- `event port_connected r=X c=Y orientation=Z`
+- `event module_found r=X c=Y type=T ... params=N ...`
+- `event mappings_loaded r=X c=Y`
+
+## Development Workflows
+
+### Building & Flashing Firmware
+
+```bash
+# From workspace root (Windows - adjust paths for Unix)
+C:\.platformio\penv\Scripts\platformio.exe run --target upload --environment pico
+```
+
+Uses PlatformIO with [earlephilhower Arduino core](https://github.com/earlephilhower/arduino-pico). Build flags in [platformio.ini](platformio.ini):
+- `-DUSE_TINYUSB` - Enable TinyUSB composite device
+- `-DPICONTROL_USE_ADAFRUIT_TINYUSB` - Use Adafruit TinyUSB library wrappers
+
+### Running Web Interface
+
+```bash
+cd webcontrol
+bun install  # First time only
+bun dev      # Hot reload on http://localhost:5173
+```
+
+**Browser setup**: Requires Chrome/Edge for Web Serial API. Click "Connect" → select Pico's CDC port → UI auto-syncs with firmware.
+
+### Adding a New Module Type
+
+1. **Define in [common.hpp](src/common.hpp)**: Add to `ModuleType` enum
+2. **Handle in [module_task.cpp](src/module_task.cpp)**: Update `handleResponseMessage()` if special logic needed
+3. **UI updates**: Add type-specific rendering in [Grid.vue](webcontrol/src/components/Grid.vue), [ParamPanel.vue](webcontrol/src/components/ParamPanel.vue)
+
+### Adding a New Mapping Type
+
+1. **Define action**: Add to `ActionType` enum in [module_mapping_config.h](src/module_mapping_config.h)
+2. **Implement execution**: Edit `applyMappingAction()` in [module_task.cpp](src/module_task.cpp)
+3. **USB queue call**: Use `usb::sendMidi*()` or `usb::sendKey*()` helpers from [usb_device.h](src/usb_device.h)
+4. **UI support**: Update [MappingEditor.vue](webcontrol/src/components/MappingEditor.vue) mapping form
+
+## Code Conventions
+
+### Logging
+
+**Never use `Serial.print()`** - it conflicts with hardware UART. Use `UsbSerial.print()` instead (routes to USB CDC).
+
+```cpp
+// ✅ Correct
+UsbSerial.println("Module connected");
+
+// ❌ Wrong - breaks hardware serial
+Serial.println("Module connected");
+```
+
+### Queue-Based Cross-Core Communication
+
+Pattern from [runtime_config.h](src/runtime_config.h):
+
+```cpp
+// Core 0 (USB) wants to trigger action on Core 1
+bool enqueueAutoupdate(int row, int col, bool enable, uint16_t intervalMs);
+
+// Core 1 polls for requests
+bool tryDequeueAutoupdate(AutoupdateRequest &out);
+```
+
+Uses Pico SDK `queue_t` with `queue_try_add`/`queue_try_remove` (non-blocking).
+
+### Module Parameter Types
+
+[common.hpp](src/common.hpp) defines 3 types:
+- `PARAM_TYPE_INT` - int32_t 
+- `PARAM_TYPE_FLOAT` - float (IEEE 754)
+- `PARAM_TYPE_BOOL` - uint8_t (0/1)
+
+Access via union `ModuleParameterValue`. Check `ModuleParameter::dataType` before accessing union members.
+
+### State Management (Web UI)
+
+Single reactive store ([useStore.ts](webcontrol/src/composables/useStore.ts)):
+- `state.modules` - Keyed by `"r,c"`, contains detected modules
+- `state.ports` - Physical port configuration matrix
+- `state.mappings` - All active parameter→action mappings
+- `state.selected` - Currently selected module/param in UI
+
+Protocol handler ([protocol.ts](webcontrol/src/services/protocol.ts)) parses CDC events/responses and mutates store.
+
+## Key Files Reference
+
+- [main.cpp](src/main.cpp) - Core 0 entry (USB only)
+- [module_task.cpp](src/module_task.cpp) - Core 1 entry (setup1/loop1), module message router
+- [port.cpp](src/port.cpp)/[port.h](src/port.h) - Port management, message queuing to/from modules
+- [mapping.cpp](src/mapping.cpp) - Mapping persistence and lookup
+- [usb_device.cpp](src/usb_device.cpp) - TinyUSB composite device, CDC command parser
+- [boardconfig.h](src/boardconfig.h) - 3×3 port GPIO pin matrix (modify for different layouts)
+- [webcontrol/src/services/serial.ts](webcontrol/src/services/serial.ts) - Web Serial connection handler
+- [webcontrol/src/services/protocol.ts](webcontrol/src/services/protocol.ts) - CDC protocol parser
+
+## Debugging Tips
+
+- **Check terminal output**: PlatformIO uploads often show linker/build issues not visible in IDE
+- **Web Serial logs**: [LogPanel.vue](webcontrol/src/components/LogPanel.vue) shows TX/RX - verify command format
+- **Module not detected**: Check `boardconfig.h` pin assignments and physical wiring (TX↔RX crossover)
+- **Crash/hang after module change**: Core 1 might be stuck waiting for response - add timeouts to `propsRequestAttempts` logic

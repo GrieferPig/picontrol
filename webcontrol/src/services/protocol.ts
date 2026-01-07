@@ -167,6 +167,26 @@ export function useProtocol() {
                                 // ignore
                             } else {
                                 p.value = value;
+
+                                // If calibrating a non-bool read-only parameter, track min/max
+                                if (p.calibrating && p.dt !== 2 && (p.access & 2) === 0) {
+                                    // Parse numeric value
+                                    let numVal: number | undefined;
+                                    if (p.dt === 0) { // int
+                                        numVal = parseInt(value, 10);
+                                    } else if (p.dt === 1) { // float
+                                        numVal = parseFloat(value);
+                                    }
+
+                                    if (numVal !== undefined && !isNaN(numVal)) {
+                                        if (p.calibMin === undefined || numVal < p.calibMin) {
+                                            p.calibMin = numVal;
+                                        }
+                                        if (p.calibMax === undefined || numVal > p.calibMax) {
+                                            p.calibMax = numVal;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

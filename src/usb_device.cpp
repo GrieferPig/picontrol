@@ -626,7 +626,7 @@ namespace usb
             if (argc >= 2 && strcmp(argv[1], "set") == 0)
             {
                 // param set <r> <c> <pid> <datatype> <value>
-                // datatype: 0=int, 1=float, 2=bool
+                // datatype: 0=int, 1=float, 2=bool, 3=led
                 if (argc < 7)
                 {
                     printlnErr("usage: param set r c pid datatype value");
@@ -645,6 +645,32 @@ namespace usb
                 return;
             }
             printlnErr("usage: param set r c pid datatype value");
+            return;
+        }
+
+        if (strcmp(argv[0], "calib") == 0)
+        {
+            if (argc >= 2 && strcmp(argv[1], "set") == 0)
+            {
+                // calib set <r> <c> <pid> <min> <max>
+                if (argc < 7)
+                {
+                    printlnErr("usage: calib set r c pid min max");
+                    return;
+                }
+                long r, c, minVal, maxVal;
+                uint8_t pid;
+                if (!parseInt(argv[2], r) || !parseInt(argv[3], c) ||
+                    !parseU8(argv[4], pid) || !parseInt(argv[5], minVal) || !parseInt(argv[6], maxVal))
+                {
+                    printlnErr("bad args");
+                    return;
+                }
+                const bool ok = runtime_config::enqueueSetCalib((int)r, (int)c, pid, (int32_t)minVal, (int32_t)maxVal);
+                printlnOk(ok ? "queued" : "queue_full");
+                return;
+            }
+            printlnErr("usage: calib set r c pid min max");
             return;
         }
 

@@ -42,6 +42,7 @@ enum ModuleParameterDataType : uint8_t
     PARAM_TYPE_INT = 0,
     PARAM_TYPE_FLOAT = 1,
     PARAM_TYPE_BOOL = 2,
+    PARAM_TYPE_LED = 3,
 };
 
 // Module capability flags (bitmask)
@@ -60,11 +61,33 @@ enum ModuleParameterAccess : uint8_t
 
 // On-wire payloads must be tightly packed
 #pragma pack(push, 1)
+
+// LED value structure
+typedef struct
+{
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t status; // 0=off, 1=on
+} LEDValue;
+
+// LED range structure
+typedef struct
+{
+    uint8_t rMin;
+    uint8_t rMax;
+    uint8_t gMin;
+    uint8_t gMax;
+    uint8_t bMin;
+    uint8_t bMax;
+} LEDRange;
+
 union ModuleParameterValue
 {
     int32_t intValue;
     float floatValue;
     uint8_t boolValue;
+    LEDValue ledValue;
 };
 
 union ModuleParameterMinMax
@@ -79,6 +102,7 @@ union ModuleParameterMinMax
         float floatMin;
         float floatMax;
     };
+    LEDRange ledRange;
 };
 
 typedef struct
@@ -142,6 +166,7 @@ typedef enum : uint8_t
     CMD_SET_AUTOUPDATE = 0x05,
     CMD_GET_MAPPINGS = 0x06,
     CMD_SET_MAPPINGS = 0x07,
+    CMD_SET_CALIB = 0x08,
     CMD_RESPONSE = 0x80,
 } ModuleMessageId;
 
@@ -190,6 +215,13 @@ typedef struct
     uint8_t enable;      // 0=disable (host polls), 1=enable (module pushes)
     uint16_t intervalMs; // 0=on-change only
 } ModuleMessageSetAutoupdatePayload;
+
+typedef struct
+{
+    uint8_t parameterId;
+    int32_t minValue;
+    int32_t maxValue;
+} ModuleMessageSetCalibPayload;
 
 // Mapping structures for wire protocol
 // Must match ModuleMapping in module_mapping_config.h but packed

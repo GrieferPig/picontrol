@@ -18,15 +18,13 @@ static uint32_t connectionTime[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static bool propsRequested[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static uint8_t propsRequestAttempts[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static uint32_t lastPropsRequestMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
-static constexpr uint32_t DEMO_PARAM_DELAY_MS = 2000;
-static constexpr uint32_t DEMO_GET_PARAM_DELAY_MS = 2600;
-static constexpr uint32_t DEMO_RESET_DELAY_MS = 3200;
 
 static constexpr uint32_t PROPS_RETRY_INTERVAL_MS = 50;
 static constexpr uint8_t PROPS_MAX_ATTEMPTS = 10;
 
 static constexpr uint32_t PARAM_POLL_INTERVAL_MS = 50;
 static constexpr uint32_t POST_SET_PARAM_DELAY_MS = 20;
+static constexpr uint32_t PARAM_EVENT_THROTTLE_MS = 100;
 static bool autoupdateEnabled[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static uint32_t lastParamPollMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 static uint8_t nextParamIndex[MODULE_PORT_ROWS][MODULE_PORT_COLS];
@@ -38,6 +36,15 @@ static uint8_t pendingParamPollId[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 // Cache last seen values to support edge-triggered actions.
 static bool lastValueValid[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
 static ModuleParameterValue lastValue[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
+
+// Track last event time for throttling param_changed events
+static uint32_t lastEventTimeMs[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
+
+// Track pending throttled events that need to be sent after settling
+static bool hasPendingEvent[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
+static uint32_t lastChangeTimeMs[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
+static ModuleParameterValue pendingEventValue[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
+static ModuleParameterDataType pendingEventDataType[MODULE_PORT_ROWS][MODULE_PORT_COLS][32];
 
 static const char *commandToString(ModuleMessageId id)
 {
@@ -59,6 +66,8 @@ static const char *commandToString(ModuleMessageId id)
         return "GET_MAPPINGS";
     case ModuleMessageId::CMD_SET_MAPPINGS:
         return "SET_MAPPINGS";
+    case ModuleMessageId::CMD_SET_CALIB:
+        return "SET_CALIB";
     case ModuleMessageId::CMD_RESPONSE:
         return "RESPONSE";
     default:
@@ -93,6 +102,11 @@ static bool parseValueFromResponse(const Port *port, uint8_t pid, const ModuleMe
         if (len < sizeof(float))
             return false;
         memcpy(&outValue.floatValue, data, sizeof(float));
+        return true;
+    case ModuleParameterDataType::PARAM_TYPE_LED:
+        if (len < sizeof(LEDValue))
+            return false;
+        memcpy(&outValue.ledValue, data, sizeof(LEDValue));
         return true;
     default:
         return false;
@@ -142,6 +156,8 @@ static bool valueEquals(ModuleParameterDataType dt, const ModuleParameterValue &
         return a.intValue == b.intValue;
     case ModuleParameterDataType::PARAM_TYPE_FLOAT:
         return memcmp(&a.floatValue, &b.floatValue, sizeof(float)) == 0;
+    case ModuleParameterDataType::PARAM_TYPE_LED:
+        return memcmp(&a.ledValue, &b.ledValue, sizeof(LEDValue)) == 0;
     default:
         return false;
     }
@@ -735,6 +751,25 @@ void loop1()
                                 (double)mp.minMax.floatMax,
                                 (double)mp.value.floatValue);
                             break;
+                        case ModuleParameterDataType::PARAM_TYPE_LED:
+                            appendf(
+                                "param r=%d c=%d pid=%u dt=%u access=%u name=\"%s\" min=%u,%u,%u,%u,%u,%u max=0,0,0,0,0,0 value=%u,%u,%u,%u\n",
+                                r, c,
+                                (unsigned)mp.id,
+                                (unsigned)mp.dataType,
+                                (unsigned)mp.access,
+                                mp.name,
+                                (unsigned)mp.minMax.ledRange.rMin,
+                                (unsigned)mp.minMax.ledRange.rMax,
+                                (unsigned)mp.minMax.ledRange.gMin,
+                                (unsigned)mp.minMax.ledRange.gMax,
+                                (unsigned)mp.minMax.ledRange.bMin,
+                                (unsigned)mp.minMax.ledRange.bMax,
+                                (unsigned)mp.value.ledValue.r,
+                                (unsigned)mp.value.ledValue.g,
+                                (unsigned)mp.value.ledValue.b,
+                                (unsigned)mp.value.ledValue.status);
+                            break;
                         default:
                             appendf(
                                 "param r=%d c=%d pid=%u dt=%u access=%u name=\"%s\"\n",
@@ -856,6 +891,20 @@ void loop1()
             case ModuleParameterDataType::PARAM_TYPE_BOOL:
                 val.boolValue = (spreq.valueStr[0] == '1' || spreq.valueStr[0] == 't' || spreq.valueStr[0] == 'T') ? 1 : 0;
                 break;
+            case ModuleParameterDataType::PARAM_TYPE_LED:
+            {
+                // Parse LED value: "r,g,b,status" or similar
+                // For simplicity, expect comma-separated values
+                int r = 0, g = 0, b = 0, s = 0;
+                if (sscanf(spreq.valueStr, "%d,%d,%d,%d", &r, &g, &b, &s) >= 3)
+                {
+                    val.ledValue.r = static_cast<uint8_t>(r);
+                    val.ledValue.g = static_cast<uint8_t>(g);
+                    val.ledValue.b = static_cast<uint8_t>(b);
+                    val.ledValue.status = static_cast<uint8_t>(s);
+                }
+                break;
+            }
             default:
                 continue;
             }
@@ -867,6 +916,23 @@ void loop1()
             hasPendingParamPoll[spreq.row][spreq.col] = true;
             pendingParamPollTime[spreq.row][spreq.col] = millis() + POST_SET_PARAM_DELAY_MS;
             pendingParamPollId[spreq.row][spreq.col] = spreq.paramId;
+        }
+    }
+
+    // Handle set calibration requests from core0
+    runtime_config::SetCalibRequest screq;
+    while (runtime_config::tryDequeueSetCalib(screq))
+    {
+        Port *p = getPort(screq.row, screq.col);
+        if (p && p->configured && p->hasModule)
+        {
+            ModuleMessageSetCalibPayload payload{};
+            payload.parameterId = screq.paramId;
+            payload.minValue = screq.minValue;
+            payload.maxValue = screq.maxValue;
+
+            sendMessage(screq.row, screq.col, ModuleMessageId::CMD_SET_CALIB,
+                        (const uint8_t *)&payload, sizeof(payload));
         }
     }
 
@@ -1215,24 +1281,54 @@ void loop1()
                             lastValue[port->row][port->col][pid] = cur;
                             lastValueValid[port->row][port->col][pid] = true;
 
-                            UsbSerial.print("event param_changed r=");
-                            UsbSerial.print(port->row);
-                            UsbSerial.print(" c=");
-                            UsbSerial.print(port->col);
-                            UsbSerial.print(" pid=");
-                            UsbSerial.print(pid);
-                            UsbSerial.print(" value=");
-                            switch (dt)
+                            // Throttle param_changed events - skip if same parameter triggered within 100ms
+                            uint32_t now = millis();
+                            uint32_t lastEventTime = lastEventTimeMs[port->row][port->col][pid];
+                            bool shouldSendEvent = (now - lastEventTime) >= PARAM_EVENT_THROTTLE_MS;
+
+                            // Track this change time for debouncing
+                            lastChangeTimeMs[port->row][port->col][pid] = now;
+
+                            if (shouldSendEvent)
                             {
-                            case ModuleParameterDataType::PARAM_TYPE_BOOL:
-                                UsbSerial.println(cur.boolValue ? 1 : 0);
-                                break;
-                            case ModuleParameterDataType::PARAM_TYPE_INT:
-                                UsbSerial.println(cur.intValue);
-                                break;
-                            case ModuleParameterDataType::PARAM_TYPE_FLOAT:
-                                UsbSerial.println(cur.floatValue, 6);
-                                break;
+                                lastEventTimeMs[port->row][port->col][pid] = now;
+                                hasPendingEvent[port->row][port->col][pid] = false;
+
+                                UsbSerial.print("event param_changed r=");
+                                UsbSerial.print(port->row);
+                                UsbSerial.print(" c=");
+                                UsbSerial.print(port->col);
+                                UsbSerial.print(" pid=");
+                                UsbSerial.print(pid);
+                                UsbSerial.print(" value=");
+                                switch (dt)
+                                {
+                                case ModuleParameterDataType::PARAM_TYPE_BOOL:
+                                    UsbSerial.println(cur.boolValue ? 1 : 0);
+                                    break;
+                                case ModuleParameterDataType::PARAM_TYPE_INT:
+                                    UsbSerial.println(cur.intValue);
+                                    break;
+                                case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+                                    UsbSerial.println(cur.floatValue, 6);
+                                    break;
+                                case ModuleParameterDataType::PARAM_TYPE_LED:
+                                    UsbSerial.print(cur.ledValue.r);
+                                    UsbSerial.print(',');
+                                    UsbSerial.print(cur.ledValue.g);
+                                    UsbSerial.print(',');
+                                    UsbSerial.print(cur.ledValue.b);
+                                    UsbSerial.print(',');
+                                    UsbSerial.println(cur.ledValue.status);
+                                    break;
+                                }
+                            }
+                            else
+                            {
+                                // Event was throttled - mark as pending to send after settling
+                                hasPendingEvent[port->row][port->col][pid] = true;
+                                pendingEventValue[port->row][port->col][pid] = cur;
+                                pendingEventDataType[port->row][port->col][pid] = dt;
                             }
                         }
                     }
@@ -1242,6 +1338,63 @@ void loop1()
 #ifdef DEBUG_MODULE_MESSAGES
         printMessageHuman(msg, port);
 #endif
+    }
+
+    // Send pending throttled events after 100ms of no change
+    for (int r = 0; r < MODULE_PORT_ROWS; r++)
+    {
+        for (int c = 0; c < MODULE_PORT_COLS; c++)
+        {
+            Port *p = getPort(r, c);
+            if (!p || !p->hasModule)
+                continue;
+
+            for (uint8_t pid = 0; pid < p->module.parameterCount && pid < 32; pid++)
+            {
+                if (hasPendingEvent[r][c][pid])
+                {
+                    uint32_t now = millis();
+                    // If 100ms has elapsed since the last change, send the final value
+                    if ((now - lastChangeTimeMs[r][c][pid]) >= PARAM_EVENT_THROTTLE_MS)
+                    {
+                        hasPendingEvent[r][c][pid] = false;
+                        lastEventTimeMs[r][c][pid] = now;
+
+                        ModuleParameterDataType dt = pendingEventDataType[r][c][pid];
+                        ModuleParameterValue val = pendingEventValue[r][c][pid];
+
+                        UsbSerial.print("event param_changed r=");
+                        UsbSerial.print(r);
+                        UsbSerial.print(" c=");
+                        UsbSerial.print(c);
+                        UsbSerial.print(" pid=");
+                        UsbSerial.print(pid);
+                        UsbSerial.print(" value=");
+                        switch (dt)
+                        {
+                        case ModuleParameterDataType::PARAM_TYPE_BOOL:
+                            UsbSerial.println(val.boolValue ? 1 : 0);
+                            break;
+                        case ModuleParameterDataType::PARAM_TYPE_INT:
+                            UsbSerial.println(val.intValue);
+                            break;
+                        case ModuleParameterDataType::PARAM_TYPE_FLOAT:
+                            UsbSerial.println(val.floatValue, 6);
+                            break;
+                        case ModuleParameterDataType::PARAM_TYPE_LED:
+                            UsbSerial.print(val.ledValue.r);
+                            UsbSerial.print(',');
+                            UsbSerial.print(val.ledValue.g);
+                            UsbSerial.print(',');
+                            UsbSerial.print(val.ledValue.b);
+                            UsbSerial.print(',');
+                            UsbSerial.println(val.ledValue.status);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     delay(10);

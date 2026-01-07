@@ -7,7 +7,6 @@ const state = reactive<State>({
     mappings: [],
     selected: null,
     connection: { connected: false },
-    env: { mode: 'real' },
     moduleUi: {
         overrides: {},
     },

@@ -3,7 +3,6 @@ import Toolbar from './components/Toolbar.vue';
 import Grid from './components/Grid.vue';
 import ParamPanel from './components/ParamPanel.vue';
 import MappingEditor from './components/MappingEditor.vue';
-import MockPanel from './components/MockPanel.vue';
 import LogPanel from './components/LogPanel.vue';
 </script>
 
@@ -14,7 +13,6 @@ import LogPanel from './components/LogPanel.vue';
         <div class="stack">
             <ParamPanel />
             <MappingEditor />
-            <MockPanel />
             <LogPanel />
         </div>
 

@@ -30,6 +30,15 @@ namespace runtime_config
         char valueStr[32];
     };
 
+    struct SetCalibRequest
+    {
+        int8_t row;
+        int8_t col;
+        uint8_t paramId;
+        int32_t minValue;
+        int32_t maxValue;
+    };
+
     void init();
 
     // Called from core0 (USB CDC command handler) or core1.
@@ -48,6 +57,10 @@ namespace runtime_config
     // Set parameter request (sent from CDC to core1)
     bool enqueueSetParameter(int row, int col, uint8_t paramId, uint8_t dataType, const char *valueStr);
     bool tryDequeueSetParameter(SetParameterRequest &out);
+
+    // Set calibration request (sent from CDC to core1)
+    bool enqueueSetCalib(int row, int col, uint8_t paramId, int32_t minValue, int32_t maxValue);
+    bool tryDequeueSetCalib(SetCalibRequest &out);
 
     // Sync mapping request (sent from CDC to core1)
     struct SyncMappingRequest

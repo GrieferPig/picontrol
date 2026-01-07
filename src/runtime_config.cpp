@@ -11,6 +11,7 @@ namespace runtime_config
         static queue_t g_autoupdateQ;
         static queue_t g_rotationOverrideQ;
         static queue_t g_setParameterQ;
+        static queue_t g_setCalibQ;
         static queue_t g_syncMappingQ;
         static bool g_inited = false;
         static critical_section_t g_initLock;
@@ -33,6 +34,7 @@ namespace runtime_config
                 queue_init(&g_autoupdateQ, sizeof(AutoupdateRequest), 32);
                 queue_init(&g_rotationOverrideQ, sizeof(RotationOverrideRequest), 32);
                 queue_init(&g_setParameterQ, sizeof(SetParameterRequest), 32);
+                queue_init(&g_setCalibQ, sizeof(SetCalibRequest), 32);
                 queue_init(&g_syncMappingQ, sizeof(SyncMappingRequest), 32);
                 g_inited = true;
             }
@@ -149,5 +151,23 @@ namespace runtime_config
     {
         initOnce();
         return queue_try_remove(&g_syncMappingQ, &out);
+    }
+
+    bool enqueueSetCalib(int row, int col, uint8_t paramId, int32_t minValue, int32_t maxValue)
+    {
+        initOnce();
+        SetCalibRequest req{};
+        req.row = static_cast<int8_t>(row);
+        req.col = static_cast<int8_t>(col);
+        req.paramId = paramId;
+        req.minValue = minValue;
+        req.maxValue = maxValue;
+        return queue_try_add(&g_setCalibQ, &req);
+    }
+
+    bool tryDequeueSetCalib(SetCalibRequest &out)
+    {
+        initOnce();
+        return queue_try_remove(&g_setCalibQ, &out);
     }
 }
