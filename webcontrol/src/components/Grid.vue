@@ -31,7 +31,7 @@ function getPlacementForKey(s: State, key: string) {
     let portLocC = mod.portLocC || 0;
 
     const rotate180Cfg = !!ovr.rotate180;
-    const rotate180Applied = s.env && s.env.mode === 'mock' ? rotate180Cfg : false;
+    const rotate180Applied = false;
     const orientation = rotate180Applied ? ((portInfo.orientation + 2) % 4) : portInfo.orientation;
 
     let effectivePortLocR = portLocR;
@@ -143,12 +143,6 @@ async function toggleRot180(key: string, place: any) {
     const cur = state;
     const currentVal = !!((cur.moduleUi && cur.moduleUi.overrides && cur.moduleUi.overrides[key]) || {}).rotate180;
     const nextVal = !currentVal;
-
-    // In real mode, persist on the device; in mock mode, keep it local.
-    if (cur.env && cur.env.mode === 'real') {
-        await send(`rot set ${place.portR} ${place.portC} ${nextVal ? 1 : 0}`);
-        await send('modules list');
-    }
 
     if (!state.moduleUi.overrides[key]) state.moduleUi.overrides[key] = {};
     state.moduleUi.overrides[key].rotate180 = nextVal;
