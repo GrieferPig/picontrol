@@ -11,6 +11,7 @@
 #include "ipc.hpp"
 #include "port.h"
 #include "mapping.h"
+#include "debug_printf.h"
 
 static Adafruit_USBD_MIDI g_midi;
 static Adafruit_USBD_HID g_hid;
@@ -114,9 +115,12 @@ namespace usb
     static size_t g_expectedLength = 0;
     static Message::Message g_currentMessage;
 
-    // Output buffer for large responses (e.g., module list)
+    // Output buffer for preparing data to be packed (e.g., module list)
     constexpr uint32_t OUTPUT_BUF_SIZE = 8192;
     static uint8_t outputBuffer[OUTPUT_BUF_SIZE];
+
+    // Packed output buffer for sending responses (separate to avoid overwrite issues)
+    static uint8_t packedOutputBuffer[OUTPUT_BUF_SIZE];
 
     static uint8_t desc_buffer[512];
 
@@ -163,7 +167,7 @@ namespace usb
         // Use static output buffer for responses
         if (totalSize > OUTPUT_BUF_SIZE)
         {
-            printf("Response too large: %u bytes\n", totalSize);
+            dbg_printf("Response too large: %u bytes\n", totalSize);
             return; // Response too large
         }
 
@@ -203,11 +207,12 @@ namespace usb
                                    const uint8_t *data = nullptr, uint16_t dataLength = 0)
     {
         // Response format: type(1) + response(1) + subcommand(1) + length(2) + checksum(2) + packed_data(length)
+        // Uses packedOutputBuffer to avoid overwriting input data if it's in outputBuffer
         constexpr size_t RESPONSE_HEADER_SIZE = 5;
 
-        outputBuffer[0] = static_cast<uint8_t>(Message::MessageType::RESPONSE);
-        outputBuffer[1] = static_cast<uint8_t>(responseType);
-        outputBuffer[2] = subcommand;
+        packedOutputBuffer[0] = static_cast<uint8_t>(Message::MessageType::RESPONSE);
+        packedOutputBuffer[1] = static_cast<uint8_t>(responseType);
+        packedOutputBuffer[2] = subcommand;
 
         size_t packedOffset = RESPONSE_HEADER_SIZE + sizeof(uint16_t);
 
@@ -231,18 +236,18 @@ namespace usb
                 i++;
             }
 
-            // Ensure we have space in outputBuffer
+            // Ensure we have space in packedOutputBuffer
             if (packedOffset + 2 + validCount > OUTPUT_BUF_SIZE)
             {
-                printf("Packed response too large\n");
+                dbg_printf("Packed response too large\n");
                 return;
             }
 
-            outputBuffer[packedOffset++] = zeroCount;
-            outputBuffer[packedOffset++] = validCount;
+            packedOutputBuffer[packedOffset++] = zeroCount;
+            packedOutputBuffer[packedOffset++] = validCount;
             if (validCount > 0)
             {
-                memcpy(&outputBuffer[packedOffset], &data[validStart], validCount);
+                memcpy(&packedOutputBuffer[packedOffset], &data[validStart], validCount);
                 packedOffset += validCount;
             }
         }
@@ -250,21 +255,21 @@ namespace usb
         uint16_t packedDataLen = packedOffset - (RESPONSE_HEADER_SIZE + sizeof(uint16_t));
 
         // Update length in header
-        outputBuffer[3] = static_cast<uint8_t>(packedDataLen & 0xFF);        // Length LSB
-        outputBuffer[4] = static_cast<uint8_t>((packedDataLen >> 8) & 0xFF); // Length MSB
+        packedOutputBuffer[3] = static_cast<uint8_t>(packedDataLen & 0xFF);        // Length LSB
+        packedOutputBuffer[4] = static_cast<uint8_t>((packedDataLen >> 8) & 0xFF); // Length MSB
 
         // Calculate checksum over header + packed data
-        uint16_t checksum = calculate_crc16(outputBuffer, RESPONSE_HEADER_SIZE);
+        uint16_t checksum = calculate_crc16(packedOutputBuffer, RESPONSE_HEADER_SIZE);
         for (size_t k = (RESPONSE_HEADER_SIZE + sizeof(uint16_t)); k < packedOffset; k++)
         {
-            checksum = crc16_update(checksum, outputBuffer[k]);
+            checksum = crc16_update(checksum, packedOutputBuffer[k]);
         }
 
         // Insert checksum at fixed position (bytes 5-6)
-        outputBuffer[5] = static_cast<uint8_t>(checksum & 0xFF);        // Checksum LSB
-        outputBuffer[6] = static_cast<uint8_t>((checksum >> 8) & 0xFF); // Checksum MSB
+        packedOutputBuffer[5] = static_cast<uint8_t>(checksum & 0xFF);        // Checksum LSB
+        packedOutputBuffer[6] = static_cast<uint8_t>((checksum >> 8) & 0xFF); // Checksum MSB
 
-        g_cdc_bin.write(outputBuffer, packedOffset);
+        g_cdc_bin.write(packedOutputBuffer, packedOffset);
         g_cdc_bin.flush();
     }
 
@@ -305,9 +310,10 @@ namespace usb
         }
         case Message::CommandSubMapType::SET_CURVE:
         {
-            // Payload format: row(1) + col(1) + paramId(1) + curve(16)
-            if (msg->length != 20)
+            // Payload format: row(1) + col(1) + paramId(1) + curve(sizeof(Curve))
+            if (msg->length != 3 + sizeof(Curve))
             {
+                dbg_printf("SET_CURVE: expected length %d, got %d\n", (int)(3 + sizeof(Curve)), msg->length);
                 sendNack();
                 return; // Invalid length
             }
@@ -372,6 +378,18 @@ namespace usb
                                outputBuffer, responseSize);
             return;
         }
+        case Message::CommandSubMapType::CLEAR:
+        {
+            // no payload
+            if (msg->length != 0)
+            {
+                sendNack();
+                return; // Invalid length
+            }
+            MappingManager::clearAll();
+            sendAck();
+            return;
+        }
         default:
             sendNack();
             return;
@@ -384,11 +402,18 @@ namespace usb
         {
         case Message::CommandSubModuleType::LIST:
         {
-            // Exception: Access the port states directly for efficiency
+            // Convert port states to packed format for transmission
+            static PortStatePacked packedPorts[MODULE_PORT_ROWS * MODULE_PORT_COLS];
             Port::State *ports = Port::getAll();
+
+            for (int i = 0; i < MODULE_PORT_ROWS * MODULE_PORT_COLS; i++)
+            {
+                Port::toPackedState(ports[i], packedPorts[i]);
+            }
+
             sendResponsePacked(Message::ResponseType::MODULES, static_cast<uint8_t>(Message::CommandSubModuleType::LIST),
-                               reinterpret_cast<uint8_t *>(ports),
-                               sizeof(Port::State) * MODULE_PORT_ROWS * MODULE_PORT_COLS);
+                               reinterpret_cast<uint8_t *>(packedPorts),
+                               sizeof(PortStatePacked) * MODULE_PORT_ROWS * MODULE_PORT_COLS);
             break;
         }
         case Message::CommandSubModuleType::PARAM_SET:
@@ -425,7 +450,9 @@ namespace usb
             }
             uint8_t row = msg->data[0];
             uint8_t col = msg->data[1];
-
+            // TODO: Implement calibration setting
+            // For now, acknowledge the command but don't do anything
+            sendAck();
             return;
             break;
         }
@@ -489,46 +516,53 @@ namespace usb
         }
         if (length < usb::MIN_MESSAGE_SIZE)
         {
-            printf("Message too short\n");
+            dbg_printf("Message too short\n");
             sendNack();
             return; // too short to be valid
         }
-        Message::Message *msg = reinterpret_cast<Message::Message *>(messageBuffer);
-        // Extract checksum from struct (packed, so offset matches wire format)
-        uint16_t receivedChecksum = msg->checksum;
-        // Calculate checksum over header(5) + data (excluding checksum bytes)
+
+        // Parse message header manually (don't cast directly because of pointer member)
+        Message::Message msg;
+        msg.type = static_cast<Message::MessageType>(messageBuffer[0]);
+        msg.command = static_cast<Message::CommandType>(messageBuffer[1]);
+        msg.subcommand.mapSub = static_cast<Message::CommandSubMapType>(messageBuffer[2]);
+        msg.length = static_cast<uint16_t>(messageBuffer[3]) | (static_cast<uint16_t>(messageBuffer[4]) << 8);
+        msg.checksum = static_cast<uint16_t>(messageBuffer[5]) | (static_cast<uint16_t>(messageBuffer[6]) << 8);
+        msg.data = &messageBuffer[HEADER_SIZE + sizeof(uint16_t)]; // Payload starts at byte 7
+
+        // Calculate checksum over header(5) + payload (excluding checksum bytes)
         uint16_t calculatedChecksum = calculate_crc16(messageBuffer, HEADER_SIZE);
-        // Continue CRC over data portion (starts at byte 7)
+        // Continue CRC over payload portion (starts at byte 7)
         for (size_t i = HEADER_SIZE + sizeof(uint16_t); i < length; i++)
         {
             calculatedChecksum = crc16_update(calculatedChecksum, messageBuffer[i]);
         }
-        if (calculatedChecksum != receivedChecksum)
+        if (calculatedChecksum != msg.checksum)
         {
-            printf("Checksum mismatch\n");
+            dbg_printf("Checksum mismatch: calc=%04X recv=%04X\n", calculatedChecksum, msg.checksum);
             sendNack();
             return; // checksum mismatch
         }
         // Only COMMAND messages are allowed for incoming messages
-        if (msg->type != Message::MessageType::COMMAND)
+        if (msg.type != Message::MessageType::COMMAND)
         {
-            printf("Invalid message type\n");
+            dbg_printf("Invalid message type\n");
             sendNack();
             return;
         }
 
-        switch (msg->command)
+        switch (msg.command)
         {
         case Message::CommandType::MAP:
-            printf("MAP command received\n");
-            handleMap(msg);
+            dbg_printf("MAP command received\n");
+            handleMap(&msg);
             break;
         case Message::CommandType::MODULES:
-            printf("MODULES command received\n");
-            handleModules(msg);
+            dbg_printf("MODULES command received\n");
+            handleModules(&msg);
             break;
         default:
-            printf("Unknown command received\n");
+            dbg_printf("Unknown command received\n");
             sendNack();
             return;
             // Unknown command
@@ -676,12 +710,13 @@ namespace usb
                 // Check if we have received the complete message
                 if (g_expectedLength > 0 && inputPos >= g_expectedLength)
                 {
-                    // Set data pointer to the data portion in the buffer
-                    g_currentMessage.data = &inputBuffer[HEADER_SIZE];
+                    // Wire format: header(5) + checksum(2) + payload(length)
+                    // Extract checksum from bytes 5-6 (right after header)
+                    g_currentMessage.checksum = static_cast<uint16_t>(inputBuffer[HEADER_SIZE]) |
+                                                (static_cast<uint16_t>(inputBuffer[HEADER_SIZE + 1]) << 8);
 
-                    // Extract checksum (last 2 bytes, little-endian)
-                    g_currentMessage.checksum = static_cast<uint16_t>(inputBuffer[g_expectedLength - 2]) |
-                                                (static_cast<uint16_t>(inputBuffer[g_expectedLength - 1]) << 8);
+                    // Set data pointer to the payload portion (starts at byte 7)
+                    g_currentMessage.data = &inputBuffer[HEADER_SIZE + sizeof(uint16_t)];
 
                     processMessage(inputBuffer, g_expectedLength);
 

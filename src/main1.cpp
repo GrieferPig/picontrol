@@ -2,13 +2,14 @@
 #include "port.h"
 #include "ipc.hpp"
 #include "mapping.h"
+#include "debug_printf.h"
 
 void setup1()
 {
     // Core 1 setup
-    printf("Picontrol: core1 started\n");
+    dbg_printf("Picontrol: core1 started\n");
     Port::init();
-    printf("Ports initialized\n");
+    dbg_printf("Ports initialized\n");
 }
 void loop1()
 {
@@ -42,17 +43,7 @@ void loop1()
                         wm.type = (uint8_t)m->type;
 
                         // Curve
-                        wm.curve.count = m->curve.count;
-                        for (int k = 0; k < 4; k++)
-                        {
-                            wm.curve.points[k].x = m->curve.points[k].x;
-                            wm.curve.points[k].y = m->curve.points[k].y;
-                        }
-                        for (int k = 0; k < 3; k++)
-                        {
-                            wm.curve.controls[k].x = m->curve.controls[k].x;
-                            wm.curve.controls[k].y = m->curve.controls[k].y;
-                        }
+                        wm.curve.h = m->curve.h;
 
                         // Target
                         if (m->type == ACTION_MIDI_NOTE)

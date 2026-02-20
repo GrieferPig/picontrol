@@ -21,22 +21,14 @@ namespace
 
     static void fillDefaultCurve(Curve &c)
     {
-        c.count = 2;
-        c.points[0] = {0, 0};
-        c.points[1] = {255, 255};
-        c.controls[0] = {127, 127};
-        // Clear others
-        c.points[2] = {0, 0};
-        c.points[3] = {0, 0};
-        c.controls[1] = {0, 0};
-        c.controls[2] = {0, 0};
+        c.h = 16384; // Linear (0.5 in Q15)
     }
 
     static void fillTarget(ModuleMapping &m, ActionType type, uint8_t d1, uint8_t d2)
     {
         m.type = type;
-        // Initialize curve to default linear if empty (count=0)
-        if (m.curve.count == 0)
+        // Initialize curve to default linear if h=0 (uninitialized)
+        if (m.curve.h == 0)
         {
             fillDefaultCurve(m.curve);
         }
@@ -468,44 +460,16 @@ bool MappingManager::deleteMapping(int r, int c, uint8_t pid)
 
 bool MappingManager::hexToCurve(uint8_t *data, Curve *outCurve)
 {
-    // Format: count(1), points(count*2), controls(count-1*2)
-    if (data[0] < 2 || data[0] > 4)
-    {
-        return false;
-    }
-    outCurve->count = data[0];
-    size_t ptr = 1;
-    for (int i = 0; i < outCurve->count; i++)
-    {
-        outCurve->points[i].x = data[ptr++];
-        outCurve->points[i].y = data[ptr++];
-    }
-    for (int i = 0; i < outCurve->count - 1; i++)
-    {
-        outCurve->controls[i].x = data[ptr++];
-        outCurve->controls[i].y = data[ptr++];
-    }
+    // Format: h (int16_t little-endian, 2 bytes)
+    outCurve->h = static_cast<int16_t>(data[0] | (data[1] << 8));
     return true;
 }
 
 bool MappingManager::curveToHex(const Curve &curve, uint8_t *outData)
 {
-    if (curve.count < 2 || curve.count > 4)
-    {
-        return false;
-    }
-    outData[0] = curve.count;
-    size_t ptr = 1;
-    for (int i = 0; i < curve.count; i++)
-    {
-        outData[ptr++] = curve.points[i].x;
-        outData[ptr++] = curve.points[i].y;
-    }
-    for (int i = 0; i < curve.count - 1; i++)
-    {
-        outData[ptr++] = curve.controls[i].x;
-        outData[ptr++] = curve.controls[i].y;
-    }
+    // Format: h (int16_t little-endian, 2 bytes)
+    outData[0] = static_cast<uint8_t>(curve.h & 0xFF);
+    outData[1] = static_cast<uint8_t>((curve.h >> 8) & 0xFF);
     return true;
 }
 

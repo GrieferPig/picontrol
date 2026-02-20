@@ -2,6 +2,7 @@
 #include <cstring>
 #include "usb_device.h"
 #include "mapping.h"
+#include "debug_printf.h"
 
 // Framing: 0xAA, commandId, payloadLenLo, payloadLenHi, payload, checksum
 static constexpr uint8_t FRAME_START = 0xAA;
@@ -22,6 +23,9 @@ namespace Port
     static uint32_t lastPingSentMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
     static volatile uint32_t lastHeardMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
     static uint32_t lastRxHighMs[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+
+    static uint8_t pendingSetParamPid[MODULE_PORT_ROWS][MODULE_PORT_COLS];
+    static bool pendingSetParamValid[MODULE_PORT_ROWS][MODULE_PORT_COLS];
 
     static const char *orientationToString(ModuleOrientation o)
     {
@@ -72,20 +76,27 @@ namespace Port
     {
         if (!data || len == 0)
         {
-            printf("<empty>");
+            dbg_printf("<empty>");
             return;
         }
+        // Format hex bytes into a local buffer to avoid many separate dbg_printf calls
+        char hexBuf[16 * 3 + 8]; // "XX XX XX ... \0"
+        int pos = 0;
         uint16_t toPrint = len;
         if (toPrint > maxBytes)
             toPrint = maxBytes;
-        for (uint16_t i = 0; i < toPrint; i++)
+        for (uint16_t i = 0; i < toPrint && pos < (int)sizeof(hexBuf) - 4; i++)
         {
-            printf("%02X", data[i]);
-            if (i + 1 < toPrint)
-                printf(" ");
+            if (i > 0)
+                hexBuf[pos++] = ' ';
+            pos += snprintf(&hexBuf[pos], sizeof(hexBuf) - pos, "%02X", data[i]);
         }
-        if (len > toPrint)
-            printf(" ...");
+        if (len > toPrint && pos < (int)sizeof(hexBuf) - 5)
+        {
+            pos += snprintf(&hexBuf[pos], sizeof(hexBuf) - pos, " ...");
+        }
+        hexBuf[pos] = '\0';
+        dbg_printf("%s", hexBuf);
     }
 #endif
 
@@ -192,14 +203,14 @@ namespace Port
     static void logPortInsertion(int r, int c, const State &port)
     {
 #ifdef DEBUG_MODULE_MESSAGES
-        printf("[PORT] Insert r=%d c=%d hostTX=%d hostRX=%d orientation=%s\n", r, c, port.txPin, port.rxPin, orientationToString(port.orientation));
+        dbg_printf("[PORT] Insert r=%d c=%d hostTX=%d hostRX=%d orientation=%s\n", r, c, port.txPin, port.rxPin, orientationToString(port.orientation));
 #endif
     }
 
     static void logPortRemoval(int r, int c, const State &port)
     {
 #ifdef DEBUG_MODULE_MESSAGES
-        printf("[PORT] Remove r=%d c=%d hostTX=%d hostRX=%d\n", r, c, port.txPin, port.rxPin);
+        dbg_printf("[PORT] Remove r=%d c=%d hostTX=%d hostRX=%d\n", r, c, port.txPin, port.rxPin);
 #endif
     }
 
@@ -267,6 +278,8 @@ namespace Port
         lastPingSentMs[r][c] = 0;
         lastHeardMs[r][c] = 0;
         lastRxHighMs[r][c] = 0;
+        pendingSetParamPid[r][c] = 0;
+        pendingSetParamValid[r][c] = false;
 
         if (port.txPin != PORT_PIN_UNUSED)
         {
@@ -277,7 +290,7 @@ namespace Port
             pinMode(port.rxPin, INPUT_PULLDOWN);
         }
 
-        printf("event port_disconnected r=%d c=%d\n", r, c);
+        dbg_printf("event port_disconnected r=%d c=%d\n", r, c);
     }
 
     static void configurePortIfDetected(int r, int c)
@@ -391,6 +404,8 @@ namespace Port
                 lastPingSentMs[r][c] = 0;
                 lastHeardMs[r][c] = 0;
                 lastRxHighMs[r][c] = 0;
+                pendingSetParamPid[r][c] = 0;
+                pendingSetParamValid[r][c] = false;
 
                 ports[r][c].txPin = portTxPins[r][c];
                 ports[r][c].rxPin = portRxPins[r][c];
@@ -459,154 +474,192 @@ namespace Port
         {
             Port::State *port = Port::get(msg.moduleRow, msg.moduleCol);
 
-            if (msg.commandId == ModuleMessageId::CMD_RESPONSE && msg.payloadLength >= 4)
+            if (!port)
             {
-                ModuleMessageResponsePayload resp{};
-                uint16_t copyLen = msg.payloadLength;
-                if (copyLen > sizeof(resp))
-                    copyLen = sizeof(resp);
-                memcpy(&resp, msg.payload, copyLen);
+                dbg_printf("warn: received message for non-existent port r=%d c=%d\n", msg.moduleRow, msg.moduleCol);
+                continue;
+            }
 
-                if (port && resp.status == ModuleStatus::MODULE_STATUS_OK &&
-                    resp.inResponseTo == ModuleMessageId::CMD_GET_PROPERTIES &&
-                    resp.payloadLength >= (uint16_t)(1u + offsetof(Module, parameterCount) + 1u))
-                {
-                    ModuleMessageGetPropertiesPayload props{};
-                    const uint16_t n = (resp.payloadLength > sizeof(props)) ? (uint16_t)sizeof(props) : resp.payloadLength;
-                    memcpy(&props, resp.payload, n);
+            if (msg.commandId != ModuleMessageId::CMD_RESPONSE || msg.payloadLength < 4)
+            {
+                dbg_printf("warn: received malformed response message r=%d c=%d cmd=%d len=%d\n", msg.moduleRow, msg.moduleCol, msg.commandId, msg.payloadLength);
+                continue;
+            }
 
-                    // Clamp parameterCount to what actually fits in this payload.
-                    if (props.module.parameterCount > 8)
-                        props.module.parameterCount = 8;
-                    const size_t headerBytes = 1u + offsetof(Module, parameters);
-                    if (resp.payloadLength < headerBytes)
-                    {
-                        props.module.parameterCount = 0;
-                    }
-                    else
-                    {
-                        const size_t availParamBytes = (size_t)resp.payloadLength - headerBytes;
-                        const uint8_t maxParams = (uint8_t)(availParamBytes / sizeof(ModuleParameter));
-                        if (props.module.parameterCount > maxParams)
-                            props.module.parameterCount = maxParams;
-                    }
+            ModuleMessageResponsePayload resp{};
+            uint16_t copyLen = msg.payloadLength;
+            if (copyLen > sizeof(resp))
+                copyLen = sizeof(resp);
+            memcpy(&resp, msg.payload, copyLen);
 
-                    port->module = props.module;
-                    bool wasNew = !port->hasModule;
-                    port->hasModule = true;
+            if (resp.status != ModuleStatus::MODULE_STATUS_OK)
+            {
+                dbg_printf("warn: received error response from module r=%d c=%d in response to cmd=%d\n", msg.moduleRow, msg.moduleCol, resp.inResponseTo);
+                continue;
+            }
 
-                    // Check for auto update capability
-                    if (port->module.capabilities & MODULE_CAP_AUTOUPDATE)
-                    {
-                        // Enable auto update with on-change only
-                        sendSetAutoupdate(port->row, port->col, 1, 0);
-                    }
-
-                    if (wasNew)
-                    {
-                        // Fetch mappings from module
-                        sendGetMappings(port->row, port->col);
-                    }
-                }
-                else if (port && resp.status == ModuleStatus::MODULE_STATUS_OK &&
-                         resp.inResponseTo == ModuleMessageId::CMD_GET_MAPPINGS &&
-                         resp.payloadLength >= 1)
-                {
-                    ModuleMessageGetMappingsPayload mappingsPayload{};
-                    uint16_t copyLen = resp.payloadLength;
-                    if (copyLen > sizeof(mappingsPayload))
-                        copyLen = sizeof(mappingsPayload);
-                    memcpy(&mappingsPayload, resp.payload, copyLen);
-
-                    MappingManager::clearMappingsForPort(port->row, port->col);
-
-                    for (int i = 0; i < mappingsPayload.count && i < 8; i++)
-                    {
-                        const WireModuleMapping &wm = mappingsPayload.mappings[i];
-                        ModuleMapping m{};
-                        m.row = port->row;
-                        m.col = port->col;
-                        m.paramId = wm.paramId;
-                        m.type = (ActionType)wm.type;
-
-                        // Curve
-                        m.curve.count = wm.curve.count;
-                        for (int k = 0; k < 4; k++)
-                        {
-                            m.curve.points[k].x = wm.curve.points[k].x;
-                            m.curve.points[k].y = wm.curve.points[k].y;
-                        }
-                        for (int k = 0; k < 3; k++)
-                        {
-                            m.curve.controls[k].x = wm.curve.controls[k].x;
-                            m.curve.controls[k].y = wm.curve.controls[k].y;
-                        }
-
-                        // Target
-                        if (m.type == ACTION_MIDI_NOTE)
-                        {
-                            m.target.midiNote.channel = wm.target.midiNote.channel;
-                            m.target.midiNote.noteNumber = wm.target.midiNote.noteNumber;
-                            m.target.midiNote.velocity = wm.target.midiNote.velocity;
-                        }
-                        else if (m.type == ACTION_MIDI_CC)
-                        {
-                            m.target.midiCC.channel = wm.target.midiCC.channel;
-                            m.target.midiCC.ccNumber = wm.target.midiCC.ccNumber;
-                            m.target.midiCC.value = wm.target.midiCC.value;
-                        }
-                        else if (m.type == ACTION_MIDI_PITCH_BEND)
-                        {
-                            m.target.midiCC.channel = wm.target.midiCC.channel;
-                            m.target.midiCC.ccNumber = 0;
-                            m.target.midiCC.value = 0;
-                        }
-                        else if (m.type == ACTION_MIDI_MOD_WHEEL)
-                        {
-                            m.target.midiCC.channel = wm.target.midiCC.channel;
-                            m.target.midiCC.ccNumber = 1;
-                            m.target.midiCC.value = 0;
-                        }
-                        else if (m.type == ACTION_KEYBOARD)
-                        {
-                            m.target.keyboard.keycode = wm.target.keyboard.keycode;
-                            m.target.keyboard.modifier = wm.target.keyboard.modifier;
-                        }
-
-                        MappingManager::addMapping(port->row, port->col, m);
-                    }
-                }
-
+            switch (resp.inResponseTo)
+            {
                 // Treat any OK GET_PARAMETER response as a (possibly unsolicited) parameter update.
-                if (port && resp.status == ModuleStatus::MODULE_STATUS_OK &&
-                    resp.inResponseTo == ModuleMessageId::CMD_GET_PARAMETER && resp.payloadLength >= 1)
-                {
-                    const uint8_t pid = resp.payload[0];
-                    if (port->hasModule && pid < port->module.parameterCount)
-                    {
-                        const ModuleParameterDataType dt = port->module.parameters[pid].dataType;
-                        ModuleParameterValue cur{};
-                        // Try to parse the value
-                        if (parseValueFromResponse(port, pid, resp, cur))
-                        {
-                            if (!isValueInRange(port->module.parameters[pid], cur))
-                            {
-                                printf("warn Param r=%d c=%d pid=%d value out of range, resetting\n", port->row, port->col, pid);
-                                ModuleParameterValue resetVal = getResetValue(port->module.parameters[pid]);
-                                sendSetParameter(port->row, port->col, pid, dt, resetVal);
-                                continue;
-                            }
 
-                            // Update module parameter cache
-                            ModuleParameterValue &cached = port->module.parameters[pid].value;
-                            if (!valueEquals(dt, cached, cur))
-                            {
-                                cached = cur;
-                                MappingManager::applyMapping(port, pid, dt, cur);
-                            }
+            case ModuleMessageId::CMD_GET_PARAMETER:
+            {
+                if (resp.payloadLength < 1)
+                {
+                    dbg_printf("warn: malformed GET_PARAMETER response from module r=%d c=%d\n", msg.moduleRow, msg.moduleCol);
+                    continue;
+                }
+                const uint8_t pid = resp.payload[0];
+                if (port->hasModule && pid < port->module.parameterCount)
+                {
+                    const ModuleParameterDataType dt = port->module.parameters[pid].dataType;
+                    ModuleParameterValue cur{};
+                    // Try to parse the value
+                    if (parseValueFromResponse(port, pid, resp, cur))
+                    {
+                        if (!isValueInRange(port->module.parameters[pid], cur))
+                        {
+                            dbg_printf("warn Param r=%d c=%d pid=%d value out of range, resetting\n", port->row, port->col, pid);
+                            ModuleParameterValue resetVal = getResetValue(port->module.parameters[pid]);
+                            sendSetParameter(port->row, port->col, pid, dt, resetVal);
+                            continue;
+                        }
+
+                        // Update module parameter cache
+                        ModuleParameterValue &cached = port->module.parameters[pid].value;
+                        if (!valueEquals(dt, cached, cur))
+                        {
+                            cached = cur;
+                            MappingManager::applyMapping(port, pid, dt, cur);
                         }
                     }
                 }
+                break;
+            }
+
+            case ModuleMessageId::CMD_SET_PARAMETER:
+            {
+                if (!pendingSetParamValid[port->row][port->col])
+                {
+                    dbg_printf("warn: SET_PARAMETER response with no pending pid r=%d c=%d\n", msg.moduleRow, msg.moduleCol);
+                    break;
+                }
+                const uint8_t pid = pendingSetParamPid[port->row][port->col];
+                pendingSetParamValid[port->row][port->col] = false;
+                sendGetParameter(port->row, port->col, pid);
+                break;
+            }
+                // if is a successful response to GET_PROPERTIES, update module info and mappings cache
+
+            case ModuleMessageId::CMD_GET_PROPERTIES:
+            {
+                if (resp.payloadLength < (uint16_t)(1u + offsetof(Module, parameterCount) + 1u))
+                {
+                    dbg_printf("warn: malformed CMD_GET_PROPERTIES response from module r=%d c=%d\n", msg.moduleRow, msg.moduleCol);
+                    continue;
+                }
+                ModuleMessageGetPropertiesPayload props{};
+                const uint16_t n = (resp.payloadLength > sizeof(props)) ? (uint16_t)sizeof(props) : resp.payloadLength;
+                memcpy(&props, resp.payload, n);
+
+                // Clamp parameterCount to what actually fits in this payload.
+                if (props.module.parameterCount > 8)
+                    props.module.parameterCount = 8;
+                const size_t headerBytes = 1u + offsetof(Module, parameters);
+                if (resp.payloadLength < headerBytes)
+                {
+                    props.module.parameterCount = 0;
+                }
+                else
+                {
+                    const size_t availParamBytes = (size_t)resp.payloadLength - headerBytes;
+                    const uint8_t maxParams = (uint8_t)(availParamBytes / sizeof(ModuleParameter));
+                    if (props.module.parameterCount > maxParams)
+                        props.module.parameterCount = maxParams;
+                }
+
+                port->module = props.module;
+                bool wasNew = !port->hasModule;
+                port->hasModule = true;
+
+                // Check for auto update capability
+                if (port->module.capabilities & MODULE_CAP_AUTOUPDATE)
+                {
+                    // Enable auto update with on-change only
+                    sendSetAutoupdate(port->row, port->col, 1, 0);
+                }
+
+                if (wasNew)
+                {
+                    // Fetch mappings from module
+                    sendGetMappings(port->row, port->col);
+                }
+                break;
+            }
+                // if is a successful response to GET_MAPPINGS, update mappings cache for this port
+
+            case ModuleMessageId::CMD_GET_MAPPINGS:
+            {
+                if (resp.payloadLength < 1)
+                {
+                    dbg_printf("warn: malformed CMD_GET_MAPPINGS response from module r=%d c=%d\n", msg.moduleRow, msg.moduleCol);
+                    continue;
+                }
+                ModuleMessageGetMappingsPayload mappingsPayload{};
+                uint16_t copyLen = resp.payloadLength;
+                if (copyLen > sizeof(mappingsPayload))
+                    copyLen = sizeof(mappingsPayload);
+                memcpy(&mappingsPayload, resp.payload, copyLen);
+
+                MappingManager::clearMappingsForPort(port->row, port->col);
+
+                for (int i = 0; i < mappingsPayload.count && i < 8; i++)
+                {
+                    const WireModuleMapping &wm = mappingsPayload.mappings[i];
+                    ModuleMapping m{};
+                    m.row = port->row;
+                    m.col = port->col;
+                    m.paramId = wm.paramId;
+                    m.type = (ActionType)wm.type;
+
+                    // Curve
+                    m.curve.h = wm.curve.h;
+
+                    // Target
+                    if (m.type == ACTION_MIDI_NOTE)
+                    {
+                        m.target.midiNote.channel = wm.target.midiNote.channel;
+                        m.target.midiNote.noteNumber = wm.target.midiNote.noteNumber;
+                        m.target.midiNote.velocity = wm.target.midiNote.velocity;
+                    }
+                    else if (m.type == ACTION_MIDI_CC)
+                    {
+                        m.target.midiCC.channel = wm.target.midiCC.channel;
+                        m.target.midiCC.ccNumber = wm.target.midiCC.ccNumber;
+                        m.target.midiCC.value = wm.target.midiCC.value;
+                    }
+                    else if (m.type == ACTION_MIDI_PITCH_BEND)
+                    {
+                        m.target.midiCC.channel = wm.target.midiCC.channel;
+                        m.target.midiCC.ccNumber = 0;
+                        m.target.midiCC.value = 0;
+                    }
+                    else if (m.type == ACTION_MIDI_MOD_WHEEL)
+                    {
+                        m.target.midiCC.channel = wm.target.midiCC.channel;
+                        m.target.midiCC.ccNumber = 1;
+                        m.target.midiCC.value = 0;
+                    }
+                    else if (m.type == ACTION_KEYBOARD)
+                    {
+                        m.target.keyboard.keycode = wm.target.keyboard.keycode;
+                        m.target.keyboard.modifier = wm.target.keyboard.modifier;
+                    }
+
+                    MappingManager::addMapping(port->row, port->col, m);
+                }
+                break;
+            }
             }
         }
     }
@@ -625,10 +678,10 @@ namespace Port
         }
 
 #ifdef DEBUG_MODULE_MESSAGES
-        printf("[TX] Port %d,%d cmd=%s (0x%02X) len=%u data=",
-               row, col, commandToStringTx(commandId), static_cast<uint8_t>(commandId), payloadLen);
+        dbg_printf("[TX] Port %d,%d cmd=%s (0x%02X) len=%u data=",
+                   row, col, commandToStringTx(commandId), static_cast<uint8_t>(commandId), payloadLen);
         printHexBytesTx(payload, payloadLen);
-        printf("\n");
+        dbg_printf("\n");
 #endif
 
         uint8_t frameHeader[4];
@@ -669,6 +722,11 @@ namespace Port
         payload.parameterId = parameterId;
         payload.dataType = dataType;
         payload.value = value;
+        if (row >= 0 && col >= 0 && row < MODULE_PORT_ROWS && col < MODULE_PORT_COLS)
+        {
+            pendingSetParamPid[row][col] = parameterId;
+            pendingSetParamValid[row][col] = true;
+        }
         return sendMessage(row, col, ModuleMessageId::CMD_SET_PARAMETER, reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
     }
 
@@ -750,21 +808,21 @@ namespace Port
 
         if (messageCount >= 16)
         {
-            printf("[WARN]: messageCount >= 16, may overflow");
+            dbg_printf("[WARN]: messageCount >= 16, may overflow");
         }
 
         messageTail = (messageTail + 1) % cap;
         messageCount--;
         interrupts();
 #ifdef DEBUG_MODULE_MESSAGES
-        printf("[RX] Port %u,%u cmd=%s (0x%02X) len=%u data=",
-               out.moduleRow,
-               out.moduleCol,
-               commandToStringTx(out.commandId),
-               static_cast<uint8_t>(out.commandId),
-               out.payloadLength);
+        dbg_printf("[RX] Port %u,%u cmd=%s (0x%02X) len=%u data=",
+                   out.moduleRow,
+                   out.moduleCol,
+                   commandToStringTx(out.commandId),
+                   static_cast<uint8_t>(out.commandId),
+                   out.payloadLength);
         printHexBytesTx(out.payload, out.payloadLength);
-        printf("\n");
+        dbg_printf("\n");
 #endif
         return true;
     }

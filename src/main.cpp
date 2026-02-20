@@ -2,14 +2,16 @@
 
 #include <Arduino.h>
 #include "usb_device.h"
+#include "debug_printf.h"
 
 bool core1_separate_stack = true;
 
 void setup()
 {
+  dbg_printf_init();
   usb::init();
   delay(50);
-  printf("Picontrol: core0 USB ready\n");
+  dbg_printf("Picontrol: core0 USB ready\n");
 }
 
 static uint32_t lastMillis = 0;
@@ -21,6 +23,6 @@ void loop()
   if (now - lastMillis >= 1000)
   {
     lastMillis = now;
-    printf("Core0 alive %lu ms \n", lastMillis);
+    dbg_printf("Core0 alive %lu ms \n", lastMillis);
   }
 }

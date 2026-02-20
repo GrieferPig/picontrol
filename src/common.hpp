@@ -135,6 +135,17 @@ typedef struct
     ModuleParameter parameters[8];
 } Module;
 
+// Packed port state for wire transmission (excludes runtime pointers)
+typedef struct
+{
+    int32_t row;
+    int32_t col;
+    uint8_t hasModule;
+    Module module;
+    uint8_t orientation;
+    uint8_t configured;
+} PortStatePacked;
+
 #pragma pack(pop)
 
 namespace Port
@@ -155,6 +166,17 @@ namespace Port
         uint8_t txPin;
         uint8_t rxPin;
     } State;
+
+    // Convert State to packed format for transmission
+    inline void toPackedState(const State &src, PortStatePacked &dst)
+    {
+        dst.row = src.row;
+        dst.col = src.col;
+        dst.hasModule = src.hasModule ? 1 : 0;
+        dst.module = src.module;
+        dst.orientation = static_cast<uint8_t>(src.orientation);
+        dst.configured = src.configured ? 1 : 0;
+    }
 }
 
 // Module command structure
@@ -230,17 +252,9 @@ typedef struct
 // Mapping structures for wire protocol
 // Must match ModuleMapping in module_mapping_config.h but packed
 #pragma pack(push, 1)
-struct WireCurvePoint
-{
-    uint8_t x;
-    uint8_t y;
-};
-
 struct WireCurve
 {
-    uint8_t count;
-    WireCurvePoint points[4];
-    WireCurvePoint controls[3];
+    int16_t h; // Shape parameter Q15: 16384 = linear
 };
 
 struct WireActionTargetMidiNote

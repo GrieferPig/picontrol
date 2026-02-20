@@ -13,6 +13,8 @@ enum ActionType : uint8_t
     ACTION_MIDI_MOD_WHEEL
 };
 
+#pragma pack(push, 1)
+
 struct ActionTargetMidiNote
 {
     uint8_t channel; // 1-16
@@ -43,8 +45,8 @@ union ActionTarget
 struct ModuleMapping
 {
     // Key
-    int row = -1;
-    int col = -1;
+    int32_t row = -1;
+    int32_t col = -1;
     uint8_t paramId = 0;
 
     // Value
@@ -55,3 +57,5 @@ struct ModuleMapping
 
     ActionTarget target;
 };
+
+#pragma pack(pop)
