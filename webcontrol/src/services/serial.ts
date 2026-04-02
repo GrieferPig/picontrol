@@ -16,6 +16,7 @@ interface SerialPortInfo {
 
 let connectedPortName: string | null = null;
 let unlistenSerialData: UnlistenFn | null = null;
+let unlistenSerialDisconnect: UnlistenFn | null = null;    // new listener for unexpected detach
 let inputBuffer = new Uint8Array(0);
 let pollIntervalId: number | null = null;
 let refreshModulesRequested = false;
@@ -25,7 +26,7 @@ let refreshMappingsRequested = false;
 const POLL_INTERVAL_MS = 500;
 
 export function useSerial() {
-    const { state } = useStore();
+    const { state, reset } = useStore();
     const { add: logAdd } = useLogger();
     const { handleResponse } = useProtocol();
 
@@ -78,6 +79,17 @@ export function useSerial() {
                 processBuffer();
             });
 
+            // Unexpected disconnect (device removed / error on port)
+            unlistenSerialDisconnect = await listen('serial-disconnected', async () => {
+                logAdd('Serial port disconnected (event)');
+                // make sure our cleanup runs only once
+                if (isConnected()) {
+                    await disconnect();
+                }
+                // clear any state from the previous connection
+                reset();
+            });
+
             state.connection.connected = true;
             logAdd(`Connected to ${selectedPort.name} (native serial)`);
 
@@ -107,6 +119,11 @@ export function useSerial() {
         if (unlistenSerialData) {
             unlistenSerialData();
             unlistenSerialData = null;
+        }
+
+        if (unlistenSerialDisconnect) {
+            unlistenSerialDisconnect();
+            unlistenSerialDisconnect = null;
         }
 
         if (connectedPortName) {

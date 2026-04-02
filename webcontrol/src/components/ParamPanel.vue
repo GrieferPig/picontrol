@@ -130,12 +130,22 @@ async function applyCalibration(p: ModuleParam) {
 
 async function setCalibManual(p: ModuleParam, minVal: number, maxVal: number) {
     if (!state.selected) return;
-    
-    await setCalibration(state.selected.r, state.selected.c, p.id, minVal, maxVal);
-    
-    // Update min/max in UI
+
+    // Optimistic UI: apply the new min/max immediately so the user's edit isn't
+    // clobbered by the next periodic device poll. Mark a pending calibration
+    // update timestamp so the protocol merge preserves the values until the
+    // firmware confirms (or times out).
     p.min = minVal;
     p.max = maxVal;
+    p.pendingCalibMin = minVal;
+    p.pendingCalibMax = maxVal;
+    p.pendingCalibUpdate = Date.now();
+
+    await setCalibration(state.selected.r, state.selected.c, p.id, minVal, maxVal);
+
+    // Keep pendingCalib* set — they'll be cleared by the protocol merge once the
+    // firmware confirms (or after the timeout in the client). This mirrors how
+    // parameter value pending state is handled.
 }
 </script>
 

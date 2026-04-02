@@ -280,10 +280,8 @@ fn connect_serial(
         let mut read_buf = [0_u8; 1024];
 
         while !read_stop_flag.load(Ordering::Relaxed) {
-            println!("Reading");
             match reader_port.read(&mut read_buf) {
                 Ok(bytes_read) if bytes_read > 0 => {
-                    println!("read {} bytes", bytes_read);
                     let payload = read_buf[..bytes_read].to_vec();
                     let _ = app_handle.emit("serial-data", payload);
                 }
@@ -291,7 +289,10 @@ fn connect_serial(
                 Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(_) => break,
             }
+            thread::sleep(Duration::from_millis(30));
         }
+        // always notify UI that the port is no longer usable
+        let _ = app_handle.emit("serial-disconnected", ());
     });
 
     *guard = Some(SerialConnection {
@@ -304,15 +305,16 @@ fn connect_serial(
 }
 
 #[tauri::command]
-fn disconnect_serial(state: tauri::State<AppState>) -> Result<(), String> {
+fn disconnect_serial(state: tauri::State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
     let mut guard = state.connection.lock().map_err(|_| "state lock poisoned")?;
     teardown_connection(&mut guard);
+    // notify frontend that connection is gone (useful for UI cleanup)
+    let _ = app.emit("serial-disconnected", ());
     Ok(())
 }
 
 #[tauri::command]
 fn write_serial(state: tauri::State<AppState>, data: Vec<u8>) -> Result<(), String> {
-    println!("write_serial: {} bytes", data.len());
     let guard = state.connection.lock().map_err(|_| "state lock poisoned")?;
     let connection = guard.as_ref().ok_or("not connected")?;
 

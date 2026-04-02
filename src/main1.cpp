@@ -42,8 +42,8 @@ void loop1()
                         wm.paramId = m->paramId;
                         wm.type = (uint8_t)m->type;
 
-                        // Curve
-                        wm.curve.h = m->curve.h;
+                        // Curve: convert host Curve to wire format
+                        wm.curve = curveToWireCurve(m->curve);
 
                         // Target
                         if (m->type == ACTION_MIDI_NOTE)

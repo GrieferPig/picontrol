@@ -20,4 +20,6 @@ class CurveEvaluator
 public:
     // Evaluate the curve at input x (0-255). Returns y (0-255).
     static uint8_t eval(const Curve &curve, uint8_t x);
+    // Evaluate the curve at input x (0-1023). Returns y (0-1023).
+    static uint16_t eval10(const Curve &curve, uint16_t x);
 };

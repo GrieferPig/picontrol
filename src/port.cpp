@@ -360,7 +360,7 @@ namespace Port
         lastDetectMs[r][c] = now;
 
         // Start liveness tracking.
-        lastPingSentMs[r][c] = 0;
+        lastPingSentMs[r][c] = now;
         lastHeardMs[r][c] = now;
         lastRxHighMs[r][c] = digitalRead(port.rxPin) == HIGH ? now : 0;
 
@@ -464,6 +464,17 @@ namespace Port
                 if (noRecentResponse && rxNeverHighInWindow)
                 {
                     removePort(r, c);
+                    continue;
+                }
+
+                // Retry identification if module is plugged in but not valid
+                if (!port.hasModule)
+                {
+                    if (now - lastPingSentMs[r][c] > PING_INTERVAL_MS)
+                    {
+                        lastPingSentMs[r][c] = now;
+                        sendGetProperties(r, c);
+                    }
                 }
             }
         }
@@ -622,8 +633,8 @@ namespace Port
                     m.paramId = wm.paramId;
                     m.type = (ActionType)wm.type;
 
-                    // Curve
-                    m.curve.h = wm.curve.h;
+                    // Curve: convert wire format back to host Curve
+                    m.curve = wireCurveToCurve(wm.curve);
 
                     // Target
                     if (m.type == ACTION_MIDI_NOTE)

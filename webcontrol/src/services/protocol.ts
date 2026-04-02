@@ -688,6 +688,21 @@ export function useProtocol() {
                             }
                             // else: confirmed or timed out — use firmware value and don't carry pendingValue forward
                         }
+
+                        // Preserve optimistic/manual calibration edits (min/max) recently made in the UI.
+                        // Keep the user's manual min/max until firmware confirms (timeout ~10s).
+                        if (existingParam.pendingCalibUpdate) {
+                            const elapsedCalib = Date.now() - existingParam.pendingCalibUpdate;
+                            const timedOutCalib = elapsedCalib > 10000;
+                            if (!timedOutCalib) {
+                                param.min = existingParam.min;
+                                param.max = existingParam.max;
+                                param.pendingCalibMin = existingParam.pendingCalibMin;
+                                param.pendingCalibMax = existingParam.pendingCalibMax;
+                                param.pendingCalibUpdate = existingParam.pendingCalibUpdate;
+                            }
+                        }
+
                         if (existingParam.calibrating) {
                             param.calibrating = existingParam.calibrating;
                             param.calibMin = existingParam.calibMin;

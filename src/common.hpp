@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include "curve.h"
 
 struct InterruptSerialPIO;
 
@@ -252,10 +253,37 @@ typedef struct
 // Mapping structures for wire protocol
 // Must match ModuleMapping in module_mapping_config.h but packed
 #pragma pack(push, 1)
+struct WireCurvePoint
+{
+    uint8_t x;
+    uint8_t y;
+};
+
 struct WireCurve
 {
-    int16_t h; // Shape parameter Q15: 16384 = linear
+    uint8_t count;
+    WireCurvePoint points[4];   // 8 bytes
+    WireCurvePoint controls[3]; // 6 bytes
 };
+
+// Convert host-side Curve (single h param) to wire WireCurve (15 bytes).
+// Module stores this opaquely; h is packed into points[0] as LE int16.
+static inline WireCurve curveToWireCurve(const Curve &c)
+{
+    WireCurve wc{};
+    wc.count = 0;
+    wc.points[0].x = static_cast<uint8_t>(c.h & 0xFF);
+    wc.points[0].y = static_cast<uint8_t>((c.h >> 8) & 0xFF);
+    return wc;
+}
+
+// Convert wire WireCurve back to host Curve.
+static inline Curve wireCurveToCurve(const WireCurve &wc)
+{
+    Curve c{};
+    c.h = static_cast<int16_t>(wc.points[0].x | (wc.points[0].y << 8));
+    return c;
+}
 
 struct WireActionTargetMidiNote
 {

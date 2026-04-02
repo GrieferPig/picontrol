@@ -16,6 +16,12 @@ export interface ModuleParam {
     value?: string | number;
     pendingUpdate?: number;  // timestamp when a param set was sent
     pendingValue?: string | number; // value we sent, cleared when firmware confirms
+
+    // Optimistic/manual-calibration pending state: set when user edits min/max in UI
+    pendingCalibMin?: number;
+    pendingCalibMax?: number;
+    pendingCalibUpdate?: number; // timestamp when a manual calib set was sent (or UI edited)
+
     calibrating?: boolean; // UI state: true when in calibration mode
     calibMin?: number;     // Tracked min during calibration
     calibMax?: number;     // Tracked max during calibration

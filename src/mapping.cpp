@@ -111,6 +111,81 @@ namespace
         }
         return 0;
     }
+
+    static uint16_t normalizeToU10(const Port::State *port, uint8_t pid, ModuleParameterDataType dt, const ModuleParameterValue &v)
+    {
+        if (!port || !port->hasModule || pid >= port->module.parameterCount)
+            return 0;
+        const ModuleParameter &p = port->module.parameters[pid];
+
+        if (dt == ModuleParameterDataType::PARAM_TYPE_BOOL)
+        {
+            return v.boolValue ? 1023 : 0;
+        }
+        if (dt == ModuleParameterDataType::PARAM_TYPE_INT)
+        {
+            const int32_t mn = p.minMax.intMin;
+            const int32_t mx = p.minMax.intMax;
+            if (mx <= mn)
+                return 0;
+
+            int32_t val = v.intValue;
+            if (val < mn)
+                val = mn;
+            if (val > mx)
+                val = mx;
+
+            // (val - min) * 1023 / (max - min)
+            return (uint16_t)(((int64_t)(val - mn) * 1023) / (mx - mn));
+        }
+        if (dt == ModuleParameterDataType::PARAM_TYPE_FLOAT)
+        {
+            const float mn = p.minMax.floatMin;
+            const float mx = p.minMax.floatMax;
+            if (mx <= mn)
+                return 0;
+
+            float val = v.floatValue;
+            if (val < mn)
+                val = mn;
+            if (val > mx)
+                val = mx;
+
+            return (uint16_t)((val - mn) * 1023.0f / (mx - mn));
+        }
+        return 0;
+    }
+
+    static void releaseMappingAction(const ModuleMapping &m)
+    {
+        switch (m.type)
+        {
+        case ACTION_KEYBOARD:
+            usb::sendKeyUp(m.target.keyboard.keycode);
+            break;
+        case ACTION_MIDI_CC:
+            usb::sendMidiCC(m.target.midiCC.channel - 1,
+                            m.target.midiCC.ccNumber,
+                            0);
+            break;
+        case ACTION_MIDI_MOD_WHEEL:
+            usb::sendMidiCC14(m.target.midiCC.channel - 1,
+                              1, // CC1 (Mod wheel)
+                              0);
+            break;
+        case ACTION_MIDI_PITCH_BEND:
+            usb::sendMidiPitchBend(m.target.midiCC.channel - 1,
+                                   8192); // center
+            break;
+        case ACTION_MIDI_NOTE:
+            usb::sendMidiNoteOff(m.target.midiNote.channel - 1,
+                                 m.target.midiNote.noteNumber,
+                                 0);
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 ModuleMapping MappingManager::mappings[32];
@@ -151,33 +226,7 @@ void MappingManager::clearMappingsForPort(int r, int c)
         if (mappings[i].row == r && mappings[i].col == c)
         {
             // release usb actions
-            switch (mappings[i].type)
-            {
-            case ACTION_KEYBOARD:
-                usb::sendKeyUp(mappings[i].target.keyboard.keycode);
-                break;
-            case ACTION_MIDI_CC:
-                usb::sendMidiCC(mappings[i].target.midiCC.channel - 1,
-                                mappings[i].target.midiCC.ccNumber,
-                                0);
-                break;
-            case ACTION_MIDI_MOD_WHEEL:
-                usb::sendMidiCC14(mappings[i].target.midiCC.channel - 1,
-                                  1, // CC1 (Mod wheel)
-                                  0);
-                break;
-            case ACTION_MIDI_PITCH_BEND:
-                usb::sendMidiPitchBend(mappings[i].target.midiCC.channel - 1,
-                                       8192); // center
-                break;
-            case ACTION_MIDI_NOTE:
-                usb::sendMidiNoteOff(mappings[i].target.midiNote.channel - 1,
-                                     mappings[i].target.midiNote.noteNumber,
-                                     0);
-                break;
-            default:
-                break;
-            }
+            releaseMappingAction(mappings[i]);
             // swap-remove
             if (i != mappingCount - 1)
             {
@@ -205,6 +254,7 @@ void MappingManager::addMapping(int r, int c, const ModuleMapping &m)
     {
         if (mappings[i].row == r && mappings[i].col == c && mappings[i].paramId == m.paramId)
         {
+            releaseMappingAction(mappings[i]);
             mappings[i] = m;
             mappings[i].row = r; // Ensure correct coords
             mappings[i].col = c;
@@ -273,10 +323,45 @@ void MappingManager::applyMapping(const Port::State *port, uint8_t pid, ModulePa
     if (!m || m->type == ACTION_NONE)
         return;
 
+    if (m->type == ACTION_MIDI_PITCH_BEND)
+    {
+        uint16_t rawCur10 = normalizeToU10(port, pid, dt, cur);
+        uint16_t mapCur10 = CurveEvaluator::eval10(m->curve, rawCur10);
+
+        auto u10ToPitchBendSigned = [](uint16_t v) -> int16_t
+        {
+            // Map 0..1023 into -8192..8191, forcing v=512 => 0 exactly.
+            if (v <= 512)
+            {
+                const int32_t d = (int32_t)512 - (int32_t)v; // 0..512
+                const int32_t neg = -(d * 8192) / 512;
+                return (int16_t)neg;
+            }
+            else
+            {
+                const int32_t d = (int32_t)v - (int32_t)512; // 1..511
+                const int32_t pos = (d * 8191) / 511;
+                return (int16_t)pos;
+            }
+        };
+
+        uint8_t ch = m->target.midiCC.channel;
+        if (ch > 0)
+            ch -= 1;
+
+        const int16_t pb = u10ToPitchBendSigned(mapCur10);
+        const uint16_t pb14 = (uint16_t)((int32_t)pb + 8192);
+
+        usb::sendMidiPitchBend(ch, pb14);
+        return;
+    }
+
     // Normalize inputs to 0-255
     uint8_t rawCur = normalizeToU8(port, pid, dt, cur);
     // Apply Curve
     uint8_t mapCur = CurveEvaluator::eval(m->curve, rawCur);
+    printf("Curve: h=%d, input: %d\n", m->curve.h, rawCur);
+    printf("Eval result: %d\n", mapCur);
 
     // Boolean logic based on 50% threshold of MAPPED value
     const bool curBool = (mapCur >= 128);
@@ -285,23 +370,6 @@ void MappingManager::applyMapping(const Port::State *port, uint8_t pid, ModulePa
     {
         // Scale 0..255 to 0..16383
         return (uint16_t)(((uint32_t)v * 16383u + 127u) / 255u);
-    };
-
-    auto u8ToPitchBendSigned = [](uint8_t v) -> int16_t
-    {
-        // Map 0..255 into -8192..8191, forcing v=128 => 0 exactly.
-        if (v <= 128)
-        {
-            const int32_t d = (int32_t)128 - (int32_t)v; // 0..128
-            const int32_t neg = -(d * 8192) / 128;
-            return (int16_t)neg;
-        }
-        else
-        {
-            const int32_t d = (int32_t)v - (int32_t)128; // 1..127
-            const int32_t pos = (d * 8191) / 127;
-            return (int16_t)pos;
-        }
     };
 
     switch (m->type)
@@ -339,20 +407,6 @@ void MappingManager::applyMapping(const Port::State *port, uint8_t pid, ModulePa
         const uint8_t value = mapCur >> 1;
 
         usb::sendMidiCC(ch, cc, value);
-
-        break;
-    }
-    case ACTION_MIDI_PITCH_BEND:
-    {
-        uint8_t ch = m->target.midiCC.channel;
-        if (ch > 0)
-            ch -= 1;
-
-        const int16_t pb = u8ToPitchBendSigned(mapCur);
-
-        const uint16_t pb14 = (uint16_t)((int32_t)pb + 8192);
-
-        usb::sendMidiPitchBend(ch, pb14);
 
         break;
     }
@@ -397,6 +451,7 @@ void MappingManager::updateMapping(int r, int c, uint8_t pid, ActionType type, u
     {
         if (mappings[i].row == r && mappings[i].col == c && mappings[i].paramId == pid)
         {
+            releaseMappingAction(mappings[i]);
             fillTarget(mappings[i], type, d1, d2);
             critical_section_exit(&g_mapLock);
             return;
@@ -443,6 +498,7 @@ bool MappingManager::deleteMapping(int r, int c, uint8_t pid)
     {
         if (mappings[i].row == r && mappings[i].col == c && mappings[i].paramId == pid)
         {
+            releaseMappingAction(mappings[i]);
             // swap-remove
             if (i != mappingCount - 1)
             {
